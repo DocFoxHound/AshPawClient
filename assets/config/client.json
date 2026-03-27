@@ -1,0 +1,16 @@
+{
+  "window_width": 1280,
+  "window_height": 720,
+  "fullscreen": false,
+  "vsync": true,
+  "asset_root": "assets",
+  "map_path": "maps/test_map.json",
+  "server_host": "127.0.0.1",
+  "server_port": 7777,
+  "player_name": "Local Prowler",
+  "auto_connect": true,
+  "connect_timeout_ms": 2500,
+  "handshake_timeout_ms": 2500,
+  "log_level": "info",
+  "show_debug_overlay": true
+}

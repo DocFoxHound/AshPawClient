@@ -1,0 +1,1012 @@
+PROJECT: 2D Multiplayer Animal Roleplay Game - CLIENT REPOSITORY
+PRIMARY GOAL: Build the cross-platform game client for a 2D overhead multiplayer animal roleplay game.
+LANGUAGE: C++
+TARGET PLATFORMS: Linux, macOS, Windows
+REPOSITORY ROLE: This repo owns rendering, input, camera, local UI, local asset loading, client-side presentation of world state, local prediction/smoothing, and all player-facing interaction surfaces.
+
+==================================================
+1. CLIENT MISSION
+==================================================
+
+This repository is the player-facing application for the game.
+
+The client is responsible for:
+- opening the game window
+- handling input
+- rendering the map, entities, and UI
+- loading visual/audio assets
+- sending player input and requests to the server
+- receiving authoritative world updates from the server
+- presenting smooth movement through interpolation/prediction
+- displaying chat, names, interactions, and social feedback
+- providing menus/settings/debug overlays
+
+The client is NOT responsible for:
+- deciding authoritative movement outcomes
+- deciding whether an interaction succeeds
+- deciding object ownership or world truth
+- deciding final persistent player state
+- deciding authoritative NPC/world state
+
+Core rule:
+CLIENT PRESENTS.
+SERVER DECIDES.
+
+The client may temporarily predict or smooth for responsiveness, but the server remains the source of truth for game state.
+
+==================================================
+2. DESIGN PRINCIPLES
+==================================================
+
+Design the client with these principles:
+
+1. Presentation-first responsibility
+- the client should focus on showing the game clearly and smoothly
+- keep rendering/UI concerns separate from gameplay authority
+
+2. Clear server boundary
+- the client sends input/requests
+- the client receives authoritative results
+- avoid mixing visual assumptions with authority assumptions
+
+3. Responsiveness without ownership
+- use interpolation and optional local prediction
+- do not let local presentation replace authoritative state
+
+4. Simplicity first
+- build a small, usable playable client before advanced polish
+
+5. Data-driven content where practical
+- maps, sprites, UI layout, and content references should be easy to evolve
+
+6. Cross-platform stability
+- keep platform-specific code isolated
+- use portable libraries and build tooling
+
+==================================================
+3. REPOSITORY STRUCTURE
+==================================================
+
+Suggested layout:
+
+/client-repo
+  /src
+    /app
+    /platform
+    /render
+    /assets
+    /input
+    /camera
+    /world
+    /entities
+    /net
+    /prediction
+    /ui
+    /chat
+    /interactions
+    /audio
+    /config
+    /util
+  /include
+  /assets
+    /sprites
+    /tilesets
+    /maps
+    /fonts
+    /audio
+    /ui
+  /tests
+  /docs
+  /third_party
+  CMakeLists.txt
+  README.md
+
+Suggested responsibilities:
+
+/app
+- main entry point
+- startup/shutdown
+- dependency wiring
+- high-level game state transitions
+
+/platform
+- SDL bootstrap
+- window creation
+- timing
+- platform abstractions
+
+/render
+- renderer setup
+- texture draw pipeline
+- sprite batching later if needed
+- tile rendering
+- debug rendering
+
+/assets
+- textures
+- map visuals
+- fonts
+- asset manager
+
+/input
+- keyboard/mouse handling
+- input mapping
+- action abstraction
+
+/camera
+- camera state
+- follow logic
+- world-to-screen transforms
+
+/world
+- client-side representation of visible world state
+- map presentation data
+- replicated entity states
+
+/entities
+- visual entity objects/components
+- animations
+- display names
+- presentation metadata
+
+/net
+- client connection
+- packet send/receive
+- protocol handling
+- network state
+
+/prediction
+- interpolation
+- local prediction if used
+- reconciliation hooks
+
+/ui
+- HUD
+- menus
+- settings
+- debug overlays
+
+/chat
+- chat box
+- message log
+- text bubbles/emotes later
+
+/interactions
+- target selection
+- interaction prompts
+- dialogue windows
+- request generation
+
+/audio
+- sound effects
+- ambient audio
+- music later
+
+/config
+- settings files
+- keybinds
+- display options
+
+/util
+- logging
+- helpers
+- common utilities
+
+/tests
+- asset loading tests
+- protocol serialization tests
+- UI/input utility tests
+- world interpolation tests
+
+==================================================
+4. CLIENT ARCHITECTURE OVERVIEW
+==================================================
+
+Core runtime model:
+
+- one game application
+- one render loop
+- fixed or semi-fixed local update path
+- a client-side world representation
+- a network connection to authoritative server
+- local player input routed into outbound packets
+- inbound state/events translated into visible presentation
+
+High-level flow:
+
+1. Client starts.
+2. Window and renderer initialize.
+3. Assets/config load.
+4. Player enters menu or connect flow.
+5. Client connects to server.
+6. Handshake completes.
+7. Client receives spawn/world state.
+8. Player sends movement input and interaction requests.
+9. Server sends authoritative updates/events.
+10. Client updates visible state and UI.
+11. Client smooths movement and shows chat/interactions.
+
+==================================================
+5. PHASE-BY-PHASE CLIENT DEVELOPMENT PLAN
+==================================================
+
+----------------------------------
+PHASE 0: CLIENT FOUNDATION
+----------------------------------
+
+Objective:
+Create the standalone client repository, build system, window bootstrap, and dependency setup.
+
+This phase aligns with SERVER PHASE 0.
+
+Deliverables:
+- CMake project for client repo
+- SDL integrated
+- rendering bootstrap works
+- logging system
+- config file loading
+- client executable launches and exits cleanly
+
+Tasks:
+1. Create client repository structure.
+2. Configure CMake.
+3. Add SDL dependency.
+4. Add image loading dependency.
+5. Add logging utility.
+6. Add config/settings loading.
+7. Create ClientApp entry point.
+8. Create window and renderer bootstrap.
+9. Add command-line options if desired:
+   - config path
+   - resolution override
+   - fullscreen/windowed
+   - log level
+10. Write README with build/run instructions.
+
+Success criteria:
+- client builds cleanly
+- window opens
+- clean shutdown works
+- config/settings load successfully
+
+Recommended first config fields:
+- window_width
+- window_height
+- fullscreen
+- vsync
+- asset_root
+- log_level
+
+Common pitfalls:
+- mixing networking too early into bootstrap code
+- not centralizing settings
+- trying to build menus before render/input basics work
+
+----------------------------------
+PHASE 1: LOCAL RENDERING, INPUT, CAMERA, AND MOVEMENT
+----------------------------------
+
+Objective:
+Build the smallest local playable overhead 2D prototype.
+
+This phase aligns with SERVER PHASE 1 and overall project PHASE 1.
+
+Deliverables:
+- a rendered test scene or map
+- one controllable animal sprite
+- keyboard movement
+- camera following the player
+- collision against static blockers
+- debug overlay
+
+Tasks:
+1. Implement main update/render loop.
+2. Create texture loading utility.
+3. Render a sprite on screen.
+4. Add player presentation object.
+5. Map keyboard input to movement intent.
+6. Add camera follow behavior.
+7. Add static collision in a test scene.
+8. Render simple tilemap or placeholder environment.
+9. Add debug overlay showing:
+   - FPS
+   - player coordinates
+   - collision state
+
+Success criteria:
+- local player can move around a test area
+- camera behaves correctly
+- rendering and input are stable
+- collision feels correct locally
+
+Agent instruction:
+Do not overbuild the render system yet. Prioritize one clean vertical slice.
+
+----------------------------------
+PHASE 2: CLIENT WORLD MODEL AND CONTENT PRESENTATION
+----------------------------------
+
+Objective:
+Build the client-side representation of world/entities/map content needed for presentation and future replication.
+
+This phase aligns with SERVER PHASE 1 and SERVER PHASE 4.
+
+Deliverables:
+- client world container
+- client entity representation
+- map presentation loading
+- name label support
+- separation between local visual state and future authoritative data
+
+Tasks:
+1. Create client World or Scene class.
+2. Define client-side entity representation:
+   - entity ID
+   - transform/presented position
+   - sprite reference
+   - display name
+   - animation state later
+3. Build visible tilemap rendering.
+4. Add map visual data loading.
+5. Add support for multiple entities in scene.
+6. Add world-to-screen transform flow.
+7. Add render ordering rules.
+
+Success criteria:
+- multiple entities can render in world
+- client can load visual map data
+- entity identities can map to future server IDs cleanly
+
+Design note:
+The client world is a presentation model, not the source of truth.
+
+----------------------------------
+PHASE 3: CONNECTION, HANDSHAKE, AND SESSION ACTIVATION
+----------------------------------
+
+Objective:
+Allow the client to connect to the server, complete handshake, and enter active play state.
+
+This phase aligns with SERVER PHASE 2.
+
+Deliverables:
+- ENet client connection
+- connect/disconnect flow
+- handshake packet exchange
+- connection state tracking
+- basic connection error UI/logging
+
+Tasks:
+1. Integrate ENet client.
+2. Add connect flow:
+   - target host
+   - target port
+3. Define client network states:
+   - disconnected
+   - connecting
+   - handshaking
+   - active
+   - disconnecting
+4. Send client hello or join request.
+5. Receive join accepted/rejected result.
+6. Transition app state into world/session state on success.
+7. Handle disconnect and connection failure gracefully.
+8. Log packet and connection lifecycle during development.
+
+Success criteria:
+- client can connect to running server
+- handshake completes
+- rejected joins fail gracefully
+- disconnect returns client to safe state
+
+Important note:
+Do not assume active gameplay state before handshake success.
+
+----------------------------------
+PHASE 4: INPUT TRANSMISSION AND AUTHORITATIVE PLAYER PLAYBACK
+----------------------------------
+
+Objective:
+Send player movement intent to the server and display authoritative player state returned from the server.
+
+This phase aligns with SERVER PHASE 3.
+
+Deliverables:
+- outbound movement input packets
+- player spawn handling
+- remote entity display
+- authoritative local player playback
+- despawn handling
+
+Tasks:
+1. Define local input collection for network transmission.
+2. Send movement intent packets to server.
+3. Receive spawn events for player and other entities.
+4. Map server entity IDs to client entities.
+5. Receive authoritative transform updates.
+6. Update local world representation from server messages.
+7. Remove entities on despawn/disconnect.
+8. Distinguish local player entity from remote entities for future smoothing rules.
+
+Success criteria:
+- two clients can connect to one server
+- each client can see both players move
+- local player position reflects server authority
+- join/leave events are visible and stable
+
+Core rule:
+The client should not send final position as truth. It sends movement intent.
+
+----------------------------------
+PHASE 5: SNAPSHOT PLAYBACK, INTERPOLATION, AND CLIENT SMOOTHING
+----------------------------------
+
+Objective:
+Make multiplayer movement look and feel smooth while preserving server authority.
+
+This phase aligns with SERVER PHASE 5.
+
+Deliverables:
+- snapshot buffering
+- interpolation for remote players
+- optional local prediction hooks
+- reconciliation path if local prediction is enabled
+- network debug overlay
+
+Tasks:
+1. Add timestamped snapshot handling.
+2. Buffer remote transform updates.
+3. Interpolate remote entity movement between snapshots.
+4. Optionally implement local prediction for controlled entity.
+5. If prediction is used, reconcile when authoritative updates arrive.
+6. Add debug metrics display:
+   - ping
+   - snapshot rate
+   - packet loss if available
+   - local interpolation delay
+7. Handle late/out-of-order packets safely.
+
+Success criteria:
+- remote movement appears smooth enough for gameplay 
+- local movement feels responsive
+- state remains visually coherent under normal latency
+
+Design note:
+For an RP game, consistency and readability matter more than shooter-grade instant response.
+
+----------------------------------
+PHASE 6: MAP-AWARE INTERACTION UI AND REQUEST FLOW
+----------------------------------
+
+Objective:
+Build the player-facing interaction layer for world objects and NPCs.
+
+This phase aligns with SERVER PHASE 6.
+
+Deliverables:
+- interact key or click-based targeting
+- interaction prompt UI
+- target highlighting or selection
+- request generation for server-side interactions
+- result display
+
+Tasks:
+1. Add local target selection logic.
+2. Show interact prompts for nearby/selected objects.
+3. Add request packet generation for interactions.
+4. Build interaction-specific UI examples:
+   - read sign window
+   - door prompt
+   - NPC dialogue panel
+   - seat/sit prompt
+5. Receive server-approved interaction results.
+6. Reflect updated object state in presentation.
+7. Show failure feedback where needed:
+   - too far away
+   - invalid target
+   - interaction denied
+
+Success criteria:
+- player can identify interactable objects
+- player can request interactions
+- server responses are shown clearly on client
+- interaction presentation remains separate from authority logic
+
+Important rule:
+The client asks. The server resolves. The client displays the result.
+
+----------------------------------
+PHASE 7: CHAT, NAMES, AND SOCIAL PRESENTATION
+----------------------------------
+
+Objective:
+Build the visible multiplayer social layer.
+
+This phase aligns with SERVER PHASE 7.
+
+Deliverables:
+- chat input box
+- chat log UI
+- name labels over players
+- emote/text bubble presentation
+- optional social status indicators later
+
+Tasks:
+1. Build chat message input UI.
+2. Build scrolling chat log.
+3. Send chat messages to server.
+4. Receive and display chat broadcasts.
+5. Render display names over player entities.
+6. Render emotes or text bubbles if supported.
+7. Add simple focus behavior:
+   - chat input focus
+   - escape/close handling
+8. Add optional local filters later:
+   - timestamp display
+   - chat tabs later
+   - muting later
+
+Success criteria:
+- players can send and receive chat reliably
+- names are displayed clearly and consistently
+- social communication feels readable and immediate
+
+Agent instruction:
+Start simple. Avoid overbuilding chat features before the basic loop is proven.
+
+----------------------------------
+PHASE 8: PLAYER IDENTITY, SETTINGS, AND PERSISTENCE-FACING CLIENT STATE
+----------------------------------
+
+Objective:
+Handle the player-facing side of persistence and identity.
+
+This phase aligns with SERVER PHASE 8.
+
+Deliverables:
+- player identity entry or selection flow
+- settings persistence
+- display of saved identity/state
+- reconnect flow support
+
+Tasks:
+1. Add player name entry or identity UI if needed.
+2. Store client settings locally:
+   - video
+   - audio
+   - controls
+3. Display persistent values received from server:
+   - display name
+   - map/location later
+   - customization later
+4. Handle reconnect/join flow cleanly.
+5. Keep local cached preferences separate from server-owned persistent game data.
+
+Success criteria:
+- client can present persistent player identity data
+- local user settings survive restart
+- reconnect flow is understandable
+
+Important note:
+The client may cache preferences, but persistent gameplay identity should come from server authority.
+
+----------------------------------
+PHASE 9: CLIENT TOOLING, DEBUGGING, AND ITERATION SUPPORT
+----------------------------------
+
+Objective:
+Improve development workflow, debugging, and content iteration.
+
+This phase aligns with SERVER PHASE 9.
+
+Deliverables:
+- debug overlays
+- developer UI panels
+- asset reload helpers where practical
+- improved logging and diagnostics
+
+Tasks:
+1. Add debug panels:
+   - FPS
+   - ping
+   - entity count
+   - local player ID/entity ID
+   - current map
+2. Add toggles for debug rendering:
+   - collision boxes
+   - interaction range
+   - camera bounds
+   - network stats
+3. Add better asset load error reporting.
+4. Add optional developer tools:
+   - reconnect button
+   - spawn info display
+   - packet log window in dev mode
+5. Add screenshot-safe or testable debug UI if useful.
+
+Success criteria:
+- diagnosing client behavior becomes easier
+- content presentation issues are easier to inspect
+- multiplayer debugging becomes faster
+
+----------------------------------
+PHASE 10: POLISH, USABILITY, AND ALPHA READINESS
+----------------------------------
+
+Objective:
+Stabilize the client for actual small-group playtesting.
+
+This phase aligns with SERVER PHASE 10.
+
+Deliverables:
+- settings/options menu
+- improved visuals and audio polish
+- onboarding/help hints
+- stable connect/play/disconnect flow
+- packaging for Linux/macOS/Windows
+
+Tasks:
+1. Add options/settings menu:
+   - resolution
+   - fullscreen
+   - audio sliders
+   - keybinds later
+2. Improve UI clarity and consistency.
+3. Add simple onboarding/help text.
+4. Improve visual feedback for:
+   - connect failures
+   - interaction failures
+   - chat focus
+   - loading states
+5. Package builds for target platforms.
+6. Test connect/disconnect/join failure flows.
+7. Fix major presentation bugs and crashes.
+
+Success criteria:
+- a small group can install and run the client
+- they can connect to a server and play without confusion
+- key gameplay loops are visually understandable and stable
+
+==================================================
+6. CORE CLIENT SUBSYSTEMS
+==================================================
+
+The client should eventually include these core subsystems:
+
+1. Platform subsystem
+- windowing
+- timing
+- OS abstraction through SDL
+
+2. Render subsystem
+- tilemap rendering
+- sprite rendering
+- labels/UI overlays
+- debug rendering
+
+3. Asset subsystem
+- texture loading
+- fonts
+- map visuals
+- audio resources
+
+4. Input subsystem
+- key/mouse handling
+- action mapping
+- gameplay versus UI input focus
+
+5. Camera subsystem
+- follow behavior
+- pan/zoom later if desired
+- transform helpers
+
+6. Network subsystem
+- connection lifecycle
+- packet send/receive
+- protocol dispatch
+- latency diagnostics
+
+7. Client world subsystem
+- entity presentation state
+- replicated world representation
+- object visual state
+
+8. Prediction/smoothing subsystem
+- remote interpolation
+- local prediction later
+- reconciliation if used
+
+9. UI subsystem
+- HUD
+- chat
+- interaction prompts
+- settings/debug overlays
+
+10. Audio subsystem
+- movement sounds later
+- ambient sounds later
+- UI feedback sounds
+
+==================================================
+7. CLIENT-SIDE DATA OWNERSHIP RULES
+==================================================
+
+The client owns:
+- window state
+- renderer state
+- loaded textures/audio/fonts
+- input state
+- UI state
+- local debug state
+- interpolation buffers
+- local settings/preferences
+
+The client does NOT authoritatively own:
+- true player positions
+- final interaction outcomes
+- object open/closed truth
+- persistent gameplay progression
+- authoritative NPC/world state
+
+The client may temporarily maintain:
+- predicted local movement presentation
+- visual interpolation buffers
+- local interaction target selection
+- cached display data for smoother presentation
+
+==================================================
+8. RECOMMENDED UPDATE/FRAME FLOW
+==================================================
+
+A recommended high-level client frame flow:
+
+1. Poll platform/input events
+2. Update UI input focus and action mapping
+3. Collect local gameplay intent
+4. Send input/request packets to server
+5. Process inbound network messages
+6. Update client world presentation state
+7. Run interpolation/prediction/reconciliation
+8. Update camera
+9. Render world
+10. Render labels/UI/debug overlays
+11. Present frame
+
+Design note:
+Keep render timing and network processing understandable. Avoid tightly coupling UI logic to packet handlers when possible.
+
+==================================================
+9. NETWORK PROTOCOL GUIDELINES FROM CLIENT PERSPECTIVE
+==================================================
+
+The client should follow the protocol contract defined by the server.
+
+Initial packet usage from the client side:
+
+Outbound:
+- client hello or join request
+- movement input
+- interaction request
+- chat send
+- emote/status request later
+
+Inbound:
+- join accepted/rejected
+- player spawn/despawn
+- transform snapshots
+- object state updates
+- chat broadcasts
+- interaction results
+- server notifications
+
+Guidelines:
+- never assume local success before server reply for authoritative actions
+- validate packet handling defensively
+- log protocol issues in development builds
+- separate packet parsing from UI concerns where practical
+
+==================================================
+10. TESTING STRATEGY
+==================================================
+
+The client should be testable even before the full multiplayer loop is complete.
+
+Testing priorities by phase:
+
+Phase 0-1:
+- startup/shutdown tests
+- config parsing tests
+- asset loading tests
+- input mapping tests
+- render loop sanity tests
+
+Phase 2-3:
+- entity mapping tests
+- connection state tests
+- handshake flow tests
+- join failure tests
+
+Phase 4-5:
+- spawn/despawn playback tests
+- snapshot interpolation tests
+- local prediction/reconciliation tests if implemented
+- disconnect cleanup tests
+
+Phase 6-7:
+- interaction prompt tests
+- chat UI tests
+- name label display tests
+- social event display tests
+
+Phase 8-10:
+- settings persistence tests
+- reconnect flow tests
+- usability tests
+- packaging smoke tests
+
+Agent instruction:
+Separate pure logic where possible so interpolation, input mapping, and packet interpretation can be tested without a live renderer.
+
+==================================================
+11. ALIGNMENT WITH SERVER REPO
+==================================================
+
+The client phases should align with the server phases as follows:
+
+CLIENT PHASE 0
+aligns with SERVER PHASE 0
+- repo setup
+- dependencies
+- config and application bootstrap
+
+CLIENT PHASE 1
+aligns with SERVER PHASE 1
+- local movement/render/camera prototype
+- headless world/simulation container on server
+
+CLIENT PHASE 2
+aligns with SERVER PHASE 1 and SERVER PHASE 4
+- client-side world/entity/map presentation
+- server-side world/map authority
+
+CLIENT PHASE 3
+aligns with SERVER PHASE 2
+- connect/handshake/session activation
+
+CLIENT PHASE 4
+aligns with SERVER PHASE 3
+- input transmission
+- player spawn
+- authoritative movement playback
+
+CLIENT PHASE 5
+aligns with SERVER PHASE 5
+- snapshot playback
+- interpolation/smoothing
+- replication behavior
+
+CLIENT PHASE 6
+aligns with SERVER PHASE 6
+- interaction prompts and request flow
+- authoritative interaction resolution
+
+CLIENT PHASE 7
+aligns with SERVER PHASE 7
+- chat UI
+- names/emotes presentation
+- social systems
+
+CLIENT PHASE 8
+aligns with SERVER PHASE 8
+- identity/settings presentation
+- persistence-facing behavior
+
+CLIENT PHASE 9
+aligns with SERVER PHASE 9
+- debug tools
+- iteration support
+- diagnostics
+
+CLIENT PHASE 10
+aligns with SERVER PHASE 10
+- polish
+- usability
+- alpha-readiness
+
+==================================================
+12. SCOPE CONTROL RULES FOR CLIENT DEVELOPMENT
+==================================================
+
+To keep the client project achievable:
+
+- do not overbuild the renderer early
+- do not build a full custom UI framework unless the need becomes unavoidable
+- do not add advanced animation/state machines before the multiplayer loop works
+- do not add visual polish ahead of stable movement/chat/interactions
+- do not assume every local feature should exist before server integration
+- do not let client prediction become an authority system
+
+Priority order:
+1. clarity
+2. responsiveness
+3. correctness of protocol handling
+4. usability
+5. polish
+6. performance optimization
+
+==================================================
+13. CODING STANDARDS FOR THE CLIENT AI AGENT
+==================================================
+
+Instructions for the coding agent working on the client repo:
+
+- use modern C++ conservatively
+- keep rendering, input, networking, and UI responsibilities separated
+- favor small focused classes/files
+- avoid premature abstraction
+- keep asset loading straightforward
+- keep network playback code understandable
+- build the smallest usable feature first, then extend
+- add debug visibility for complex behaviors like interpolation and input flow
+- do not let presentation code silently assume authority
+
+When implementing a new feature:
+1. identify which client phase it belongs to
+2. identify what server-facing protocol dependency it has
+3. implement the minimal viable version
+4. add clear logging/debug visibility
+5. explain how it maps to server-authoritative behavior
+
+When proposing refactors:
+- explain why the current structure is insufficient
+- preserve working gameplay loops where possible
+- avoid rewriting stable systems for style alone
+
+==================================================
+14. IMMEDIATE NEXT ACTIONS
+==================================================
+
+Immediate implementation order for the client repo:
+
+1. Create client repo and CMake setup.
+2. Integrate SDL.
+3. Add logging and config loader.
+4. Create ClientApp and window bootstrap.
+5. Render a test sprite.
+6. Implement input mapping and camera.
+7. Add local collision/test map.
+8. Build client world/entity presentation model.
+9. Integrate ENet client connection.
+10. Add handshake flow.
+11. Send movement input to server.
+12. Receive spawns and transforms.
+13. Add interpolation/smoothing.
+14. Add interaction UI and chat UI.
+
+Current recommended focus:
+CLIENT PHASE 0 through CLIENT PHASE 4 only.
+
+Do not start with:
+- advanced prediction
+- complex UI systems
+- extensive animation systems
+- persistence-heavy flows
+- cosmetic polish
+- large content authoring tools
+
+==================================================
+15. TRUE FIRST SUCCESS CONDITION
+==================================================
+
+The first real proof that the client is succeeding is not:
+- “the menus look polished”
+- “the renderer supports everything”
+- “the UI system is elegant”
+
+The first real proof of success is:
+
+“The client can open, connect to the server, send movement input, receive authoritative state, and display two players moving coherently in the same world.”
+
+After that, the next true proof is:
+
+“The client can also display chat, names, and at least one successful server-authorized interaction clearly and reliably.”
