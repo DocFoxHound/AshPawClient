@@ -42,11 +42,29 @@ void RenderSystem::RenderMapLayers(
         }
     }
 
-    if (drawOrder == assets::LayerDrawOrder::Foreground) {
-        for (const auto& blocker : map.blockers) {
-            DrawWorldRect(blocker, {0.58F, 0.42F, 0.28F, 0.55F}, camera);
-        }
+}
+
+void RenderSystem::RenderCollisionDebug(const std::vector<math::Rect>& blockers, const camera::Camera2D& camera) const {
+    for (const auto& blocker : blockers) {
+        DrawWorldRect(blocker, {0.58F, 0.42F, 0.28F, 0.32F}, camera);
+        DrawWorldOutline(blocker, {0.88F, 0.69F, 0.41F, 0.95F}, camera);
     }
+}
+
+void RenderSystem::RenderInteractionRangeDebug(const math::Vector2& center, float range, const camera::Camera2D& camera) const {
+    DrawWorldOutline(
+        {center.x - range, center.y - range, range * 2.0F, range * 2.0F},
+        {0.48F, 0.82F, 0.61F, 0.95F},
+        camera
+    );
+}
+
+void RenderSystem::RenderCameraBoundsDebug(const math::Vector2& worldSize, const camera::Camera2D& camera) const {
+    DrawWorldOutline(
+        {0.0F, 0.0F, worldSize.x, worldSize.y},
+        {0.54F, 0.78F, 0.96F, 0.95F},
+        camera
+    );
 }
 
 void RenderSystem::RenderEntities(const std::vector<world::EntityPresentation>& entities, const camera::Camera2D& camera) const {
@@ -54,6 +72,16 @@ void RenderSystem::RenderEntities(const std::vector<world::EntityPresentation>& 
         DrawWorldRect(
             {entity.position.x, entity.position.y, entity.size.x, entity.size.y},
             entity.color,
+            camera
+        );
+    }
+}
+
+void RenderSystem::RenderMarkers(const std::vector<assets::MapMarker>& markers, const camera::Camera2D& camera) const {
+    for (const auto& marker : markers) {
+        DrawWorldRect(
+            {marker.position.x - 10.0F, marker.position.y - 10.0F, 20.0F, 20.0F},
+            marker.color,
             camera
         );
     }
@@ -67,6 +95,18 @@ void RenderSystem::DrawWorldRect(const math::Rect& rect, const math::Color& colo
     const auto topLeft = camera.WorldToScreen({rect.x, rect.y});
     glColor4f(color.r, color.g, color.b, color.a);
     glBegin(GL_QUADS);
+    glVertex2f(topLeft.x, topLeft.y);
+    glVertex2f(topLeft.x + rect.w, topLeft.y);
+    glVertex2f(topLeft.x + rect.w, topLeft.y + rect.h);
+    glVertex2f(topLeft.x, topLeft.y + rect.h);
+    glEnd();
+}
+
+void RenderSystem::DrawWorldOutline(const math::Rect& rect, const math::Color& color, const camera::Camera2D& camera) {
+    const auto topLeft = camera.WorldToScreen({rect.x, rect.y});
+    glColor4f(color.r, color.g, color.b, color.a);
+    glLineWidth(2.0F);
+    glBegin(GL_LINE_LOOP);
     glVertex2f(topLeft.x, topLeft.y);
     glVertex2f(topLeft.x + rect.w, topLeft.y);
     glVertex2f(topLeft.x + rect.w, topLeft.y + rect.h);

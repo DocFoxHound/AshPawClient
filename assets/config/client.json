@@ -3,6 +3,7 @@
   "window_height": 720,
   "fullscreen": false,
   "vsync": true,
+  "master_volume_percent": 100,
   "asset_root": "assets",
   "map_path": "maps/test_map.json",
   "server_host": "127.0.0.1",
@@ -12,5 +13,8 @@
   "connect_timeout_ms": 2500,
   "handshake_timeout_ms": 2500,
   "log_level": "info",
-  "show_debug_overlay": true
+  "show_debug_overlay": true,
+  "show_onboarding_hints": true,
+  "cached_authoritative_name": "",
+  "cached_last_map": ""
 }

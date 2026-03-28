@@ -2,8 +2,12 @@
 
 #include <SDL.h>
 
+#include <algorithm>
+#include <iomanip>
 #include <mutex>
+#include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -70,9 +74,16 @@ bool NetworkClient::Connect(const ConnectionConfig& config) {
     config_ = config;
     status_.targetHost = config.host;
     status_.targetPort = config.port;
-    status_.playerName = config.playerName;
+    status_.playerName = SanitizeDisplayName(config.playerName);
     status_.lastError.clear();
     status_.sessionInit.reset();
+    status_.serverTickRate = 0;
+    status_.sessionId = 0;
+    status_.controlledEntityId = 0;
+    status_.pingMs = 0;
+    status_.packetsSent = 0;
+    status_.packetsReceived = 0;
+    packetLog_.clear();
 
     ENetAddress address {};
     address.port = config.port;
@@ -130,7 +141,12 @@ void NetworkClient::Tick(std::uint32_t serviceTimeoutMs) {
             HandleConnected();
             break;
         case ENET_EVENT_TYPE_RECEIVE:
-            HandlePacket(*event.packet);
+            ++status_.packetsReceived;
+            RecordPacket("recv", event.channelID, {
+                reinterpret_cast<const char*>(event.packet->data),
+                static_cast<std::size_t>(event.packet->dataLength)
+            });
+            HandlePacket(*event.packet, event.channelID);
             enet_packet_destroy(event.packet);
             break;
         case ENET_EVENT_TYPE_DISCONNECT:
@@ -150,13 +166,15 @@ void NetworkClient::Tick(std::uint32_t serviceTimeoutMs) {
     }
 
     const auto now = SDL_GetTicks();
+    status_.pingMs = serverPeer_ != nullptr ? serverPeer_->roundTripTime : 0U;
     if (status_.state == ConnectionState::Connecting &&
         now - connectStartTicks_ > config_.connectTimeoutMs) {
         status_.lastError = "Timed out connecting to server";
         ResetPeer();
         SetState(ConnectionState::Disconnected, "Connection timed out");
     }
-    if (status_.state == ConnectionState::Handshaking &&
+    if ((status_.state == ConnectionState::WaitingForServerHello ||
+         status_.state == ConnectionState::WaitingForJoinAccepted) &&
         now - handshakeStartTicks_ > config_.handshakeTimeoutMs) {
         status_.lastError = "Timed out waiting for handshake";
         ResetPeer();
@@ -176,7 +194,7 @@ bool NetworkClient::SessionActive() const {
     return status_.state == ConnectionState::Active;
 }
 
-std::optional<SessionInitData> NetworkClient::ConsumeSessionInit() {
+std::optional<JoinAcceptedData> NetworkClient::ConsumeSessionInit() {
     auto sessionInit = status_.sessionInit;
     status_.sessionInit.reset();
     return sessionInit;
@@ -187,9 +205,57 @@ void NetworkClient::SendMovementIntent(const MovementIntent& intent) {
         return;
     }
 
-    const auto payload = BuildMovementIntentMessage(intent);
-    auto* packet = enet_packet_create(payload.data(), payload.size(), 0);
+    const auto payload = BuildMovementInputPacket(intent);
+    if (!payload.has_value()) {
+        return;
+    }
+    auto* packet = enet_packet_create(payload->data(), payload->size(), 0);
+    enet_peer_send(serverPeer_, 1, packet);
+    ++status_.packetsSent;
+    RecordPacket("send", 1, {
+        reinterpret_cast<const char*>(payload->data()),
+        payload->size()
+    });
+}
+
+void NetworkClient::SendInteractionRequest(const InteractionRequest& request) {
+    if (status_.state != ConnectionState::Active || serverPeer_ == nullptr || clientHost_ == nullptr) {
+        return;
+    }
+
+    const auto payload = BuildInteractionRequestPacket(request);
+    if (!payload.has_value()) {
+        return;
+    }
+    auto* packet = enet_packet_create(payload->data(), payload->size(), ENET_PACKET_FLAG_RELIABLE);
     enet_peer_send(serverPeer_, 0, packet);
+    ++status_.packetsSent;
+    RecordPacket("send", 0, {
+        reinterpret_cast<const char*>(payload->data()),
+        payload->size()
+    });
+}
+
+void NetworkClient::SendChatMessage(std::string_view body) {
+    if (status_.state != ConnectionState::Active || serverPeer_ == nullptr || clientHost_ == nullptr) {
+        return;
+    }
+
+    const auto payload = BuildChatSendPacket(body);
+    if (!payload.has_value()) {
+        return;
+    }
+    auto* packet = enet_packet_create(payload->data(), payload->size(), ENET_PACKET_FLAG_RELIABLE);
+    enet_peer_send(serverPeer_, 0, packet);
+    ++status_.packetsSent;
+    RecordPacket("send", 0, {
+        reinterpret_cast<const char*>(payload->data()),
+        payload->size()
+    });
+}
+
+std::vector<std::string> NetworkClient::PacketLog() const {
+    return {packetLog_.begin(), packetLog_.end()};
 }
 
 std::vector<ServerMessage> NetworkClient::ConsumeServerMessages() {
@@ -208,49 +274,190 @@ void NetworkClient::SetState(ConnectionState state, std::string detailMessage) {
 
 void NetworkClient::HandleConnected() {
     handshakeStartTicks_ = SDL_GetTicks();
-    SetState(ConnectionState::Handshaking, "Connected. Waiting for handshake response");
+    SetState(ConnectionState::WaitingForServerHello, "Connected. Waiting for server hello");
 
-    const auto request = BuildTemporaryJoinRequest({.playerName = config_.playerName});
-    auto* packet = enet_packet_create(request.data(), request.size(), ENET_PACKET_FLAG_RELIABLE);
+    const auto request = BuildClientHelloPacket(status_.playerName);
+    if (!request.has_value()) {
+        status_.lastError = "Failed to build client hello";
+        ResetPeer();
+        SetState(ConnectionState::Disconnected, "Handshake setup failed");
+        return;
+    }
+    auto* packet = enet_packet_create(request->data(), request->size(), ENET_PACKET_FLAG_RELIABLE);
     enet_peer_send(serverPeer_, 0, packet);
+    ++status_.packetsSent;
+    RecordPacket("send", 0, {
+        reinterpret_cast<const char*>(request->data()),
+        request->size()
+    });
     enet_host_flush(clientHost_);
 }
 
-void NetworkClient::HandlePacket(const ENetPacket& packet) {
+void NetworkClient::HandlePacket(const ENetPacket& packet, std::uint8_t channelId) {
     const auto payload = std::string_view(
         reinterpret_cast<const char*>(packet.data),
         static_cast<std::size_t>(packet.dataLength)
     );
-    const auto response = ParseTemporaryHandshakeResponse(payload);
-    if (response.decision == HandshakeDecision::Accepted) {
-        status_.lastError.clear();
-        status_.sessionInit = response.sessionInit;
-        if (response.sessionInit.has_value()) {
-            status_.playerName = response.sessionInit->playerName;
+    const auto parsed = ParsePacket(payload);
+    if (parsed.kind == PacketKind::Invalid) {
+        status_.lastError = parsed.detail;
+        if (status_.state == ConnectionState::WaitingForServerHello ||
+            status_.state == ConnectionState::WaitingForJoinAccepted) {
+            ResetPeer();
+            SetState(ConnectionState::Disconnected, "Invalid handshake packet");
         }
-        SetState(ConnectionState::Active, response.detail);
-        return;
-    }
-    if (response.decision == HandshakeDecision::Rejected) {
-        status_.lastError = response.detail.empty() ? "Join rejected" : response.detail;
-        ResetPeer();
-        SetState(ConnectionState::Disconnected, "Handshake rejected");
         return;
     }
 
-    if (status_.state == ConnectionState::Active) {
-        const auto message = ParseServerMessage(payload);
-        if (message.kind == ServerMessageKind::Invalid) {
-            status_.lastError = message.detail;
+    if (status_.state == ConnectionState::WaitingForServerHello) {
+        if (parsed.kind == PacketKind::JoinRejected && parsed.joinRejected.has_value()) {
+            status_.lastError = parsed.joinRejected->message.empty() ? "Join rejected" : parsed.joinRejected->message;
+            ResetPeer();
+            SetState(ConnectionState::Disconnected, "Handshake rejected");
             return;
         }
-        serverMessages_.push(message);
+        if (parsed.kind != PacketKind::ServerHello || !parsed.serverHello.has_value()) {
+            status_.lastError = "Expected server_hello";
+            ResetPeer();
+            SetState(ConnectionState::Disconnected, "Unexpected handshake packet");
+            return;
+        }
+        if (parsed.serverHello->protocolVersion != kProtocolVersion) {
+            status_.lastError = "Unsupported protocol version";
+            ResetPeer();
+            SetState(ConnectionState::Disconnected, "Protocol mismatch");
+            return;
+        }
+        status_.serverTickRate = parsed.serverHello->tickRate;
+        SetState(ConnectionState::WaitingForJoinAccepted, "Server hello received. Waiting for join acceptance");
         return;
     }
 
-    status_.lastError = response.detail;
-    ResetPeer();
-    SetState(ConnectionState::Disconnected, "Invalid handshake response");
+    if (status_.state == ConnectionState::WaitingForJoinAccepted) {
+        if (parsed.kind == PacketKind::JoinRejected && parsed.joinRejected.has_value()) {
+            status_.lastError = parsed.joinRejected->message.empty() ? "Join rejected" : parsed.joinRejected->message;
+            ResetPeer();
+            SetState(ConnectionState::Disconnected, "Handshake rejected");
+            return;
+        }
+        if (parsed.kind != PacketKind::JoinAccepted || !parsed.joinAccepted.has_value()) {
+            status_.lastError = "Expected join_accepted";
+            ResetPeer();
+            SetState(ConnectionState::Disconnected, "Unexpected handshake packet");
+            return;
+        }
+        status_.sessionInit = parsed.joinAccepted;
+        status_.sessionId = parsed.joinAccepted->sessionId;
+        status_.controlledEntityId = parsed.joinAccepted->entityId;
+        status_.lastError.clear();
+        SetState(ConnectionState::Active, "Session active");
+        return;
+    }
+
+    if (status_.state != ConnectionState::Active) {
+        return;
+    }
+
+    switch (parsed.kind) {
+    case PacketKind::PlayerSpawn:
+        QueueServerMessage({
+            .kind = ServerMessageKind::Spawn,
+            .entity = parsed.entity,
+            .snapshotEntities = {},
+            .interactionResult = std::nullopt,
+            .objectStateUpdate = std::nullopt,
+            .chatBroadcast = std::nullopt,
+            .identityUpdate = std::nullopt,
+            .entityId = 0,
+            .detail = {}
+        });
+        break;
+    case PacketKind::PlayerDespawn:
+        QueueServerMessage({
+            .kind = ServerMessageKind::Despawn,
+            .entity = std::nullopt,
+            .snapshotEntities = {},
+            .interactionResult = std::nullopt,
+            .objectStateUpdate = std::nullopt,
+            .chatBroadcast = std::nullopt,
+            .identityUpdate = std::nullopt,
+            .entityId = parsed.entityId,
+            .detail = {}
+        });
+        break;
+    case PacketKind::TransformSnapshot:
+        QueueServerMessage({
+            .kind = ServerMessageKind::Snapshot,
+            .entity = std::nullopt,
+            .snapshotEntities = parsed.snapshotEntities,
+            .interactionResult = std::nullopt,
+            .objectStateUpdate = std::nullopt,
+            .chatBroadcast = std::nullopt,
+            .identityUpdate = std::nullopt,
+            .entityId = 0,
+            .detail = {}
+        });
+        break;
+    case PacketKind::InteractionResult:
+        QueueServerMessage({
+            .kind = ServerMessageKind::InteractionResult,
+            .entity = std::nullopt,
+            .snapshotEntities = {},
+            .interactionResult = parsed.interactionResult,
+            .objectStateUpdate = std::nullopt,
+            .chatBroadcast = std::nullopt,
+            .identityUpdate = std::nullopt,
+            .entityId = 0,
+            .detail = {}
+        });
+        break;
+    case PacketKind::ObjectStateUpdate:
+        QueueServerMessage({
+            .kind = ServerMessageKind::ObjectStateUpdate,
+            .entity = std::nullopt,
+            .snapshotEntities = {},
+            .interactionResult = std::nullopt,
+            .objectStateUpdate = parsed.objectStateUpdate,
+            .chatBroadcast = std::nullopt,
+            .identityUpdate = std::nullopt,
+            .entityId = 0,
+            .detail = {}
+        });
+        break;
+    case PacketKind::ChatBroadcast:
+        QueueServerMessage({
+            .kind = ServerMessageKind::ChatBroadcast,
+            .entity = std::nullopt,
+            .snapshotEntities = {},
+            .interactionResult = std::nullopt,
+            .objectStateUpdate = std::nullopt,
+            .chatBroadcast = parsed.chatBroadcast,
+            .identityUpdate = std::nullopt,
+            .entityId = 0,
+            .detail = {}
+        });
+        break;
+    case PacketKind::IdentityUpdate:
+        QueueServerMessage({
+            .kind = ServerMessageKind::IdentityUpdate,
+            .entity = std::nullopt,
+            .snapshotEntities = {},
+            .interactionResult = std::nullopt,
+            .objectStateUpdate = std::nullopt,
+            .chatBroadcast = std::nullopt,
+            .identityUpdate = parsed.identityUpdate,
+            .entityId = 0,
+            .detail = {}
+        });
+        break;
+    case PacketKind::ServerHello:
+    case PacketKind::JoinAccepted:
+    case PacketKind::JoinRejected:
+    case PacketKind::Invalid:
+        status_.lastError = "Unexpected packet while active";
+        static_cast<void>(channelId);
+        break;
+    }
 }
 
 void NetworkClient::ResetPeer() {
@@ -258,6 +465,22 @@ void NetworkClient::ResetPeer() {
         enet_peer_reset(serverPeer_);
         serverPeer_ = nullptr;
     }
+}
+
+void NetworkClient::RecordPacket(std::string_view direction, std::uint8_t channelId, std::string_view payload) {
+    constexpr std::size_t maxEntries = 40;
+    std::ostringstream preview;
+    preview << DescribePacket(payload) << " (" << payload.size() << " bytes)";
+    packetLog_.push_back(
+        std::string(direction) + " ch" + std::to_string(channelId) + " " + preview.str()
+    );
+    while (packetLog_.size() > maxEntries) {
+        packetLog_.pop_front();
+    }
+}
+
+void NetworkClient::QueueServerMessage(ServerMessage message) {
+    serverMessages_.push(std::move(message));
 }
 
 bool NetworkClient::AcquireEnet() {

@@ -20,11 +20,16 @@ public:
         const camera::Camera2D& camera,
         assets::LayerDrawOrder drawOrder
     ) const;
+    void RenderCollisionDebug(const std::vector<math::Rect>& blockers, const camera::Camera2D& camera) const;
+    void RenderInteractionRangeDebug(const math::Vector2& center, float range, const camera::Camera2D& camera) const;
+    void RenderCameraBoundsDebug(const math::Vector2& worldSize, const camera::Camera2D& camera) const;
+    void RenderMarkers(const std::vector<assets::MapMarker>& markers, const camera::Camera2D& camera) const;
     void RenderEntities(const std::vector<world::EntityPresentation>& entities, const camera::Camera2D& camera) const;
     void EndFrame(SDL_Window* window) const;
 
 private:
     static void DrawWorldRect(const math::Rect& rect, const math::Color& color, const camera::Camera2D& camera);
+    static void DrawWorldOutline(const math::Rect& rect, const math::Color& color, const camera::Camera2D& camera);
 };
 
 }  // namespace ashpaw::engine::render

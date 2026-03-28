@@ -16,6 +16,11 @@ void ClientWorld::ClearEntities() {
     entities_.clear();
 }
 
+void ClientWorld::ClearAuthorityState() {
+    identities_.clear();
+    interactables_.clear();
+}
+
 void ClientWorld::UpsertEntity(const EntityPresentation& entity) {
     entities_[entity.id] = entity;
 }
@@ -55,6 +60,44 @@ std::vector<EntityPresentation> ClientWorld::SortedEntities() const {
 
 std::size_t ClientWorld::EntityCount() const {
     return entities_.size();
+}
+
+void ClientWorld::UpsertIdentity(const IdentityRecord& identity) {
+    identities_[identity.entityId] = identity;
+}
+
+void ClientWorld::RemoveIdentity(EntityId id) {
+    identities_.erase(id);
+}
+
+std::optional<IdentityRecord> ClientWorld::FindIdentity(EntityId id) const {
+    const auto iterator = identities_.find(id);
+    if (iterator == identities_.end()) {
+        return std::nullopt;
+    }
+    return iterator->second;
+}
+
+void ClientWorld::UpsertInteractable(const InteractableRecord& interactable) {
+    interactables_[interactable.targetId] = interactable;
+}
+
+std::optional<InteractableRecord> ClientWorld::FindInteractable(std::string_view targetId) const {
+    const auto iterator = interactables_.find(std::string(targetId));
+    if (iterator == interactables_.end()) {
+        return std::nullopt;
+    }
+    return iterator->second;
+}
+
+std::vector<InteractableRecord> ClientWorld::Interactables() const {
+    std::vector<InteractableRecord> interactables;
+    interactables.reserve(interactables_.size());
+    for (const auto& [targetId, interactable] : interactables_) {
+        static_cast<void>(targetId);
+        interactables.push_back(interactable);
+    }
+    return interactables;
 }
 
 void ClientWorld::SetLocalPlayerId(EntityId id) {

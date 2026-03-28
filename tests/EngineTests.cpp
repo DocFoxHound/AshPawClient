@@ -1,5 +1,5 @@
-#include <fstream>
 #include <chrono>
+#include <fstream>
 #include <thread>
 #include <unordered_map>
 
@@ -10,9 +10,8 @@
 #include "ashpaw/engine/camera/Camera2D.hpp"
 #include "ashpaw/engine/config/Config.hpp"
 #include "ashpaw/engine/input/InputSystem.hpp"
-#include "ashpaw/engine/net/HandshakeProtocol.hpp"
 #include "ashpaw/engine/net/NetworkClient.hpp"
-#include "ashpaw/engine/net/TemporaryProtocol.hpp"
+#include "ashpaw/engine/net/Protocol.hpp"
 #include "ashpaw/engine/prediction/SnapshotBuffer.hpp"
 #include "ashpaw/engine/world/ClientWorld.hpp"
 
@@ -20,14 +19,37 @@
 
 namespace {
 
-class ScopedEnetServer {
+float SquaredDistance(const ashpaw::engine::math::Vector2& lhs, const ashpaw::engine::math::Vector2& rhs) {
+    const auto dx = lhs.x - rhs.x;
+    const auto dy = lhs.y - rhs.y;
+    return (dx * dx) + (dy * dy);
+}
+
+std::string NormalizeIdentityKey(std::string_view value) {
+    std::string normalized;
+    normalized.reserve(value.size());
+    for (const auto character : value) {
+        normalized.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(character))));
+    }
+    return normalized;
+}
+
+struct PersistedPlayer {
+    std::uint32_t entityId {1001};
+    std::string displayName;
+    float x {160.0F};
+    float y {160.0F};
+};
+
+class ScopedProtocolServer {
 public:
-    ScopedEnetServer(enet_uint16 preferredPort, std::string reservedName)
+    ScopedProtocolServer(enet_uint16 preferredPort, std::string reservedName)
         : reservedName_(std::move(reservedName)) {
         initialized_ = enet_initialize() == 0;
         if (!initialized_) {
             return;
         }
+
         for (enet_uint16 candidatePort = preferredPort; candidatePort < preferredPort + 32; ++candidatePort) {
             ENetAddress address {};
             address.host = ENET_HOST_ANY;
@@ -38,13 +60,14 @@ public:
                 break;
             }
         }
+
         running_ = host_ != nullptr;
         if (running_) {
             thread_ = std::thread([this]() { Run(); });
         }
     }
 
-    ~ScopedEnetServer() {
+    ~ScopedProtocolServer() {
         running_ = false;
         if (thread_.joinable()) {
             thread_.join();
@@ -67,6 +90,32 @@ public:
     }
 
 private:
+    struct ConnectedPlayer {
+        std::uint32_t sessionId {0};
+        PersistedPlayer persisted {};
+        std::string identityKey;
+    };
+
+    static void SendPacket(ENetPeer* peer, std::uint8_t channelId, const std::vector<std::uint8_t>& payload) {
+        auto* packet = enet_packet_create(payload.data(), payload.size(), ENET_PACKET_FLAG_RELIABLE);
+        enet_peer_send(peer, channelId, packet);
+    }
+
+    void BroadcastIdentity(const ConnectedPlayer& player, ENetPeer* peer) {
+        SendPacket(peer, 0, ashpaw::engine::net::BuildIdentityUpdatePacket({
+            .entityId = player.persisted.entityId,
+            .displayName = player.persisted.displayName
+        }));
+    }
+
+    void BroadcastObjectState(ENetPeer* peer) {
+        SendPacket(peer, 0, ashpaw::engine::net::BuildObjectStateUpdatePacket({
+            .targetId = "welcome_stone",
+            .isOpen = false,
+            .occupantEntityId = 0
+        }));
+    }
+
     void Run() {
         ENetEvent event {};
         while (running_) {
@@ -80,64 +129,117 @@ private:
                     reinterpret_cast<const char*>(event.packet->data),
                     static_cast<std::size_t>(event.packet->dataLength)
                 );
-                if (!playerByPeer_.contains(event.peer)) {
-                    const auto request = ashpaw::engine::net::ParseTemporaryJoinRequest(payload);
-                    ashpaw::engine::net::HandshakeResponse response;
-                    if (request.decision == ashpaw::engine::net::JoinRequestDecision::Accepted &&
-                        request.playerName != reservedName_) {
-                        playerByPeer_[event.peer] = {
-                            .entityId = 1001,
-                            .displayName = request.playerName,
-                            .x = 160.0F,
-                            .y = 160.0F,
-                            .width = 36.0F,
-                            .height = 36.0F,
-                            .localControlled = true,
-                            .kind = ashpaw::engine::net::EntityKind::Player
-                        };
-                        response = {
-                            .decision = ashpaw::engine::net::HandshakeDecision::Accepted,
-                            .detail = "Join accepted",
-                            .sessionInit = ashpaw::engine::net::SessionInitData {
-                                .playerEntityId = playerByPeer_[event.peer].entityId,
-                                .playerName = playerByPeer_[event.peer].displayName,
-                                .mapName = "starter_meadow",
-                                .spawnX = playerByPeer_[event.peer].x,
-                                .spawnY = playerByPeer_[event.peer].y
-                            }
-                        };
+                if (!playersByPeer_.contains(event.peer)) {
+                    const auto hello = ashpaw::engine::net::ParseClientHelloPacket(payload);
+                    if (!hello.has_value()) {
+                        SendPacket(event.peer, 0, ashpaw::engine::net::BuildJoinRejectedPacket({
+                            .reasonCode = ashpaw::engine::net::JoinRejectReasonCode::MalformedPacket,
+                            .message = "invalid_client_hello"
+                        }));
                     } else {
-                        response = {
-                            .decision = ashpaw::engine::net::HandshakeDecision::Rejected,
-                            .detail = request.playerName == reservedName_ ? "name_taken" : "invalid_join_request",
-                            .sessionInit = std::nullopt
-                        };
+                        const auto sanitizedName = ashpaw::engine::net::SanitizeDisplayName(hello->displayName);
+                        if (hello->protocolVersion != ashpaw::engine::net::kProtocolVersion) {
+                            SendPacket(event.peer, 0, ashpaw::engine::net::BuildJoinRejectedPacket({
+                                .reasonCode = ashpaw::engine::net::JoinRejectReasonCode::InvalidProtocol,
+                                .message = "invalid_protocol"
+                            }));
+                        } else if (sanitizedName == reservedName_) {
+                            SendPacket(event.peer, 0, ashpaw::engine::net::BuildJoinRejectedPacket({
+                                .reasonCode = ashpaw::engine::net::JoinRejectReasonCode::MalformedPacket,
+                                .message = "name_taken"
+                            }));
+                        } else {
+                            const auto identityKey = NormalizeIdentityKey(sanitizedName);
+                            auto persisted = persistedByIdentity_.contains(identityKey)
+                                ? persistedByIdentity_.at(identityKey)
+                                : PersistedPlayer {
+                                      .entityId = nextEntityId_++,
+                                      .displayName = sanitizedName,
+                                      .x = 160.0F,
+                                      .y = 160.0F
+                                  };
+                            persisted.displayName = sanitizedName;
+
+                            auto player = ConnectedPlayer {
+                                .sessionId = nextSessionId_++,
+                                .persisted = persisted,
+                                .identityKey = identityKey
+                            };
+                            playersByPeer_[event.peer] = player;
+
+                            SendPacket(event.peer, 0, ashpaw::engine::net::BuildServerHelloPacket({
+                                .protocolVersion = ashpaw::engine::net::kProtocolVersion,
+                                .tickRate = 20
+                            }));
+                            SendPacket(event.peer, 0, ashpaw::engine::net::BuildJoinAcceptedPacket({
+                                .sessionId = player.sessionId,
+                                .entityId = player.persisted.entityId,
+                                .spawnX = player.persisted.x,
+                                .spawnY = player.persisted.y
+                            }));
+
+                            for (const auto& [peer, existingPlayer] : playersByPeer_) {
+                                static_cast<void>(peer);
+                                SendPacket(event.peer, 0, ashpaw::engine::net::BuildPlayerSpawnPacket({
+                                    .entityId = existingPlayer.persisted.entityId,
+                                    .x = existingPlayer.persisted.x,
+                                    .y = existingPlayer.persisted.y
+                                }));
+                                BroadcastIdentity(existingPlayer, event.peer);
+                            }
+                            BroadcastObjectState(event.peer);
+                        }
                     }
-                    const auto reply = ashpaw::engine::net::BuildTemporaryHandshakeResponse(response);
-                    auto* packet = enet_packet_create(reply.data(), reply.size(), ENET_PACKET_FLAG_RELIABLE);
-                    enet_peer_send(event.peer, 0, packet);
-                    if (response.decision == ashpaw::engine::net::HandshakeDecision::Accepted) {
-                        auto entity = playerByPeer_.at(event.peer);
-                        entity.localControlled = true;
-                        const auto spawnPayload = ashpaw::engine::net::BuildSpawnMessage(entity);
-                        auto* spawnPacket = enet_packet_create(spawnPayload.data(), spawnPayload.size(), ENET_PACKET_FLAG_RELIABLE);
-                        enet_peer_send(event.peer, 0, spawnPacket);
-                    }
-                } else if (const auto movement = ashpaw::engine::net::ParseMovementIntentMessage(payload); movement.has_value()) {
-                    auto& entity = playerByPeer_.at(event.peer);
-                    entity.x += movement->x * 8.0F;
-                    entity.y += movement->y * 8.0F;
-                    entity.localControlled = true;
-                    const auto snapshotPayload = ashpaw::engine::net::BuildSnapshotMessage(entity);
-                    auto* snapshotPacket = enet_packet_create(snapshotPayload.data(), snapshotPayload.size(), ENET_PACKET_FLAG_RELIABLE);
-                    enet_peer_send(event.peer, 0, snapshotPacket);
+                } else if (const auto movement = ashpaw::engine::net::ParseMovementInputPacket(payload); movement.has_value()) {
+                    auto& player = playersByPeer_.at(event.peer);
+                    player.persisted.x += movement->x * 8.0F;
+                    player.persisted.y += movement->y * 8.0F;
+                    SendPacket(event.peer, 0, ashpaw::engine::net::BuildTransformSnapshotPacket({
+                        {
+                            .entityId = player.persisted.entityId,
+                            .x = player.persisted.x,
+                            .y = player.persisted.y
+                        }
+                    }));
+                } else if (const auto request = ashpaw::engine::net::ParseInteractionRequestPacket(payload); request.has_value()) {
+                    const auto& player = playersByPeer_.at(event.peer).persisted;
+                    const auto playerCenter = ashpaw::engine::math::Vector2 {
+                        player.x + 18.0F,
+                        player.y + 18.0F
+                    };
+                    const auto result = request->targetId == "welcome_stone" &&
+                            SquaredDistance(playerCenter, {240.0F, 180.0F}) <= (120.0F * 120.0F)
+                        ? ashpaw::engine::net::InteractionResult {
+                              .status = ashpaw::engine::net::InteractionStatus::Success,
+                              .targetId = "welcome_stone",
+                              .message = "The carved stone reads: 'Stay kind, stay curious, and share the meadow.'"
+                          }
+                        : ashpaw::engine::net::InteractionResult {
+                              .status = ashpaw::engine::net::InteractionStatus::OutOfRange,
+                              .targetId = request->targetId,
+                              .message = "Move closer before trying that interaction again."
+                          };
+                    SendPacket(event.peer, 0, ashpaw::engine::net::BuildInteractionResultPacket(result));
+                } else if (const auto chat = ashpaw::engine::net::ParseChatSendPacket(payload); chat.has_value()) {
+                    const auto& player = playersByPeer_.at(event.peer).persisted;
+                    SendPacket(event.peer, 0, ashpaw::engine::net::BuildChatBroadcastPacket({
+                        .entityId = player.entityId,
+                        .displayName = player.displayName,
+                        .message = *chat
+                    }));
                 }
                 enet_host_flush(host_);
                 enet_packet_destroy(event.packet);
                 break;
             }
             case ENET_EVENT_TYPE_CONNECT:
+                break;
             case ENET_EVENT_TYPE_DISCONNECT:
+                if (playersByPeer_.contains(event.peer)) {
+                    persistedByIdentity_[playersByPeer_.at(event.peer).identityKey] = playersByPeer_.at(event.peer).persisted;
+                    playersByPeer_.erase(event.peer);
+                }
+                break;
             case ENET_EVENT_TYPE_NONE:
                 break;
             }
@@ -145,12 +247,15 @@ private:
     }
 
     ENetHost* host_ {nullptr};
-    std::string reservedName_;
     std::thread thread_ {};
     bool running_ {false};
     bool initialized_ {false};
     enet_uint16 port_ {0};
-    std::unordered_map<ENetPeer*, ashpaw::engine::net::ReplicatedEntityState> playerByPeer_;
+    std::string reservedName_;
+    std::uint32_t nextSessionId_ {9001};
+    std::uint32_t nextEntityId_ {1001};
+    std::unordered_map<ENetPeer*, ConnectedPlayer> playersByPeer_;
+    std::unordered_map<std::string, PersistedPlayer> persistedByIdentity_;
 };
 
 }  // namespace
@@ -161,6 +266,7 @@ TEST_CASE("config loads expected fields", "[config]") {
     stream << R"({
         "window_width": 800,
         "window_height": 600,
+        "master_volume_percent": 72,
         "asset_root": "test_assets",
         "server_host": "example.test",
         "server_port": 4567,
@@ -168,13 +274,17 @@ TEST_CASE("config loads expected fields", "[config]") {
         "auto_connect": false,
         "connect_timeout_ms": 1400,
         "handshake_timeout_ms": 2100,
-        "show_debug_overlay": false
+        "show_debug_overlay": false,
+        "show_onboarding_hints": false,
+        "cached_authoritative_name": "Scout",
+        "cached_last_map": "starter_meadow"
     })";
     stream.close();
 
     const auto config = ashpaw::engine::config::Config::LoadFromFile(tempPath);
     REQUIRE(config.windowWidth == 800);
     REQUIRE(config.windowHeight == 600);
+    REQUIRE(config.masterVolumePercent == 72);
     REQUIRE(config.assetRoot == "test_assets");
     REQUIRE(config.serverHost == "example.test");
     REQUIRE(config.serverPort == 4567);
@@ -183,90 +293,154 @@ TEST_CASE("config loads expected fields", "[config]") {
     REQUIRE(config.connectTimeoutMs == 1400);
     REQUIRE(config.handshakeTimeoutMs == 2100);
     REQUIRE(config.showDebugOverlay == false);
+    REQUIRE(config.showOnboardingHints == false);
+    REQUIRE(config.cachedAuthoritativeName == "Scout");
+    REQUIRE(config.cachedLastMap == "starter_meadow");
 }
 
-TEST_CASE("temporary handshake protocol builds and parses responses", "[net]") {
-    const auto request = ashpaw::engine::net::BuildTemporaryJoinRequest({
-        .playerName = "Prowler"
+TEST_CASE("config saves and reloads persistence-facing fields", "[config]") {
+    const auto tempPath = std::filesystem::temp_directory_path() / "ashpaw_saved_config.json";
+    const auto savedConfig = ashpaw::engine::config::AppConfig {
+        .windowWidth = 1440,
+        .windowHeight = 900,
+        .fullscreen = true,
+        .vsync = false,
+        .masterVolumePercent = 65,
+        .assetRoot = "assets",
+        .mapPath = "maps/test_map.json",
+        .serverHost = "127.0.0.1",
+        .serverPort = 8888,
+        .playerName = "Saved Prowler",
+        .autoConnect = false,
+        .connectTimeoutMs = 1200,
+        .handshakeTimeoutMs = 2200,
+        .logLevel = "debug",
+        .showDebugOverlay = false,
+        .showOnboardingHints = false,
+        .cachedAuthoritativeName = "Saved_Prowler",
+        .cachedLastMap = "fern_hollow"
+    };
+    ashpaw::engine::config::Config::SaveToFile(tempPath, savedConfig);
+
+    const auto loadedConfig = ashpaw::engine::config::Config::LoadFromFile(tempPath);
+    REQUIRE(loadedConfig.windowWidth == 1440);
+    REQUIRE(loadedConfig.windowHeight == 900);
+    REQUIRE(loadedConfig.fullscreen);
+    REQUIRE_FALSE(loadedConfig.vsync);
+    REQUIRE(loadedConfig.masterVolumePercent == 65);
+    REQUIRE(loadedConfig.serverPort == 8888);
+    REQUIRE(loadedConfig.playerName == "Saved Prowler");
+    REQUIRE_FALSE(loadedConfig.autoConnect);
+    REQUIRE_FALSE(loadedConfig.showOnboardingHints);
+    REQUIRE(loadedConfig.cachedAuthoritativeName == "Saved_Prowler");
+    REQUIRE(loadedConfig.cachedLastMap == "fern_hollow");
+}
+
+TEST_CASE("binary protocol codec builds and parses current packets", "[net]") {
+    const auto sanitized = ashpaw::engine::net::SanitizeDisplayName("  Prowler!!  ");
+    REQUIRE(sanitized == "Prowler");
+
+    const auto helloPayload = ashpaw::engine::net::BuildClientHelloPacket("Prowler");
+    REQUIRE(helloPayload.has_value());
+    const auto hello = ashpaw::engine::net::ParseClientHelloPacket({
+        reinterpret_cast<const char*>(helloPayload->data()),
+        helloPayload->size()
     });
-    REQUIRE(request == "join:Prowler");
+    REQUIRE(hello.has_value());
+    REQUIRE(hello->protocolVersion == ashpaw::engine::net::kProtocolVersion);
+    REQUIRE(hello->displayName == "Prowler");
 
-    const auto parsedJoin = ashpaw::engine::net::ParseTemporaryJoinRequest(request);
-    REQUIRE(parsedJoin.decision == ashpaw::engine::net::JoinRequestDecision::Accepted);
-    REQUIRE(parsedJoin.playerName == "Prowler");
-
-    const auto invalidJoin = ashpaw::engine::net::ParseTemporaryJoinRequest("ping");
-    REQUIRE(invalidJoin.decision == ashpaw::engine::net::JoinRequestDecision::Invalid);
-
-    const auto acceptedPayload = ashpaw::engine::net::BuildTemporaryHandshakeResponse({
-        .decision = ashpaw::engine::net::HandshakeDecision::Accepted,
-        .detail = "ignored",
-        .sessionInit = ashpaw::engine::net::SessionInitData {
-            .playerEntityId = 42,
-            .playerName = "Prowler",
-            .mapName = "starter_meadow",
-            .spawnX = 12.0F,
-            .spawnY = 34.0F
-        }
+    const auto movementPayload = ashpaw::engine::net::BuildMovementInputPacket({.x = 1.0F, .y = -1.0F});
+    REQUIRE(movementPayload.has_value());
+    const auto movement = ashpaw::engine::net::ParseMovementInputPacket({
+        reinterpret_cast<const char*>(movementPayload->data()),
+        movementPayload->size()
     });
-    REQUIRE(acceptedPayload.starts_with("join_accepted:"));
-
-    const auto rejectedPayload = ashpaw::engine::net::BuildTemporaryHandshakeResponse({
-        .decision = ashpaw::engine::net::HandshakeDecision::Rejected,
-        .detail = "name_taken",
-        .sessionInit = std::nullopt
-    });
-    REQUIRE(rejectedPayload == "join_rejected:name_taken");
-
-    const auto accepted = ashpaw::engine::net::ParseTemporaryHandshakeResponse("join_accepted");
-    REQUIRE(accepted.decision == ashpaw::engine::net::HandshakeDecision::Accepted);
-    REQUIRE_FALSE(accepted.sessionInit.has_value());
-
-    const auto acceptedWithSession = ashpaw::engine::net::ParseTemporaryHandshakeResponse(acceptedPayload);
-    REQUIRE(acceptedWithSession.decision == ashpaw::engine::net::HandshakeDecision::Accepted);
-    REQUIRE(acceptedWithSession.sessionInit.has_value());
-    REQUIRE(acceptedWithSession.sessionInit->playerEntityId == 42);
-    REQUIRE(acceptedWithSession.sessionInit->playerName == "Prowler");
-    REQUIRE(acceptedWithSession.sessionInit->mapName == "starter_meadow");
-    REQUIRE(acceptedWithSession.sessionInit->spawnX == Catch::Approx(12.0F));
-    REQUIRE(acceptedWithSession.sessionInit->spawnY == Catch::Approx(34.0F));
-
-    const auto rejected = ashpaw::engine::net::ParseTemporaryHandshakeResponse("join_rejected:name_taken");
-    REQUIRE(rejected.decision == ashpaw::engine::net::HandshakeDecision::Rejected);
-    REQUIRE(rejected.detail == "name_taken");
-
-    const auto invalid = ashpaw::engine::net::ParseTemporaryHandshakeResponse("mystery_payload");
-    REQUIRE(invalid.decision == ashpaw::engine::net::HandshakeDecision::Invalid);
-
-    const auto movementPayload = ashpaw::engine::net::BuildMovementIntentMessage({.x = 1.0F, .y = -1.0F});
-    const auto movement = ashpaw::engine::net::ParseMovementIntentMessage(movementPayload);
     REQUIRE(movement.has_value());
     REQUIRE(movement->x == Catch::Approx(1.0F));
     REQUIRE(movement->y == Catch::Approx(-1.0F));
 
-    const ashpaw::engine::net::ReplicatedEntityState entity {
+    const auto interactionPayload = ashpaw::engine::net::BuildInteractionRequestPacket({.targetId = "welcome_stone"});
+    REQUIRE(interactionPayload.has_value());
+    const auto interaction = ashpaw::engine::net::ParseInteractionRequestPacket({
+        reinterpret_cast<const char*>(interactionPayload->data()),
+        interactionPayload->size()
+    });
+    REQUIRE(interaction.has_value());
+    REQUIRE(interaction->targetId == "welcome_stone");
+
+    const auto chatPayload = ashpaw::engine::net::BuildChatSendPacket("Hello meadow");
+    REQUIRE(chatPayload.has_value());
+    const auto chat = ashpaw::engine::net::ParseChatSendPacket({
+        reinterpret_cast<const char*>(chatPayload->data()),
+        chatPayload->size()
+    });
+    REQUIRE(chat.has_value());
+    REQUIRE(*chat == "Hello meadow");
+    REQUIRE_FALSE(ashpaw::engine::net::BuildChatSendPacket(std::string(121, 'a')).has_value());
+
+    const auto serverHelloPayload = ashpaw::engine::net::BuildServerHelloPacket({
+        .protocolVersion = 1,
+        .tickRate = 20
+    });
+    const auto serverHello = ashpaw::engine::net::ParsePacket({
+        reinterpret_cast<const char*>(serverHelloPayload.data()),
+        serverHelloPayload.size()
+    });
+    REQUIRE(serverHello.kind == ashpaw::engine::net::PacketKind::ServerHello);
+    REQUIRE(serverHello.serverHello->tickRate == 20);
+
+    const auto joinAcceptedPayload = ashpaw::engine::net::BuildJoinAcceptedPacket({
+        .sessionId = 42,
         .entityId = 1001,
-        .displayName = "Prowler",
-        .x = 160.0F,
-        .y = 168.0F,
-        .width = 36.0F,
-        .height = 36.0F,
-        .localControlled = true,
-        .kind = ashpaw::engine::net::EntityKind::Player
-    };
-    const auto spawn = ashpaw::engine::net::ParseServerMessage(ashpaw::engine::net::BuildSpawnMessage(entity));
-    REQUIRE(spawn.kind == ashpaw::engine::net::ServerMessageKind::Spawn);
-    REQUIRE(spawn.entity.has_value());
-    REQUIRE(spawn.entity->entityId == 1001);
+        .spawnX = 12.0F,
+        .spawnY = 34.0F
+    });
+    const auto joinAccepted = ashpaw::engine::net::ParsePacket({
+        reinterpret_cast<const char*>(joinAcceptedPayload.data()),
+        joinAcceptedPayload.size()
+    });
+    REQUIRE(joinAccepted.kind == ashpaw::engine::net::PacketKind::JoinAccepted);
+    REQUIRE(joinAccepted.joinAccepted->sessionId == 42);
+    REQUIRE(joinAccepted.joinAccepted->entityId == 1001);
 
-    const auto snapshot = ashpaw::engine::net::ParseServerMessage(ashpaw::engine::net::BuildSnapshotMessage(entity));
-    REQUIRE(snapshot.kind == ashpaw::engine::net::ServerMessageKind::Snapshot);
-    REQUIRE(snapshot.entity.has_value());
-    REQUIRE(snapshot.entity->localControlled == true);
+    const auto snapshotPayload = ashpaw::engine::net::BuildTransformSnapshotPacket({
+        {.entityId = 1001, .x = 160.0F, .y = 168.0F},
+        {.entityId = 1002, .x = 172.0F, .y = 180.0F}
+    });
+    const auto snapshot = ashpaw::engine::net::ParsePacket({
+        reinterpret_cast<const char*>(snapshotPayload.data()),
+        snapshotPayload.size()
+    });
+    REQUIRE(snapshot.kind == ashpaw::engine::net::PacketKind::TransformSnapshot);
+    REQUIRE(snapshot.snapshotEntities.size() == 2);
+    REQUIRE(snapshot.snapshotEntities.front().entityId == 1001);
 
-    const auto despawn = ashpaw::engine::net::ParseServerMessage(ashpaw::engine::net::BuildDespawnMessage(1001));
-    REQUIRE(despawn.kind == ashpaw::engine::net::ServerMessageKind::Despawn);
-    REQUIRE(despawn.entityId == 1001);
+    const auto objectPayload = ashpaw::engine::net::BuildObjectStateUpdatePacket({
+        .targetId = "welcome_stone",
+        .isOpen = false,
+        .occupantEntityId = 0
+    });
+    const auto objectPacket = ashpaw::engine::net::ParsePacket({
+        reinterpret_cast<const char*>(objectPayload.data()),
+        objectPayload.size()
+    });
+    REQUIRE(objectPacket.kind == ashpaw::engine::net::PacketKind::ObjectStateUpdate);
+    REQUIRE(objectPacket.objectStateUpdate->occupantEntityId == 0);
+
+    const auto identityPayload = ashpaw::engine::net::BuildIdentityUpdatePacket({
+        .entityId = 1001,
+        .displayName = "Prowler"
+    });
+    const auto identity = ashpaw::engine::net::ParsePacket({
+        reinterpret_cast<const char*>(identityPayload.data()),
+        identityPayload.size()
+    });
+    REQUIRE(identity.kind == ashpaw::engine::net::PacketKind::IdentityUpdate);
+    REQUIRE(identity.identityUpdate->displayName == "Prowler");
+
+    const auto invalid = ashpaw::engine::net::ParsePacket(std::string_view("\xFF", 1));
+    REQUIRE(invalid.kind == ashpaw::engine::net::PacketKind::Invalid);
 }
 
 TEST_CASE("input mapping respects UI capture", "[input]") {
@@ -276,16 +450,30 @@ TEST_CASE("input mapping respects UI capture", "[input]") {
     event.type = SDL_KEYDOWN;
     event.key.keysym.sym = SDLK_w;
     input.HandleEvent(event);
+    event.key.keysym.sym = SDLK_e;
+    input.HandleEvent(event);
+    event.key.keysym.sym = SDLK_RETURN;
+    input.HandleEvent(event);
+    event.key.keysym.sym = SDLK_ESCAPE;
+    input.HandleEvent(event);
 
     const auto freeSnapshot = input.Snapshot(false);
     REQUIRE(freeSnapshot.moveUp);
+    REQUIRE(freeSnapshot.interactPressed);
+    REQUIRE(freeSnapshot.openChatPressed);
+    REQUIRE(freeSnapshot.dismissUiPressed);
+    REQUIRE(freeSnapshot.quitRequested);
 
     const auto capturedSnapshot = input.Snapshot(true);
     REQUIRE_FALSE(capturedSnapshot.moveUp);
+    REQUIRE_FALSE(capturedSnapshot.interactPressed);
+    REQUIRE(capturedSnapshot.openChatPressed);
+    REQUIRE(capturedSnapshot.dismissUiPressed);
+    REQUIRE_FALSE(capturedSnapshot.quitRequested);
 }
 
-TEST_CASE("network client completes local handshake against test server", "[net]") {
-    ScopedEnetServer server(7777, "taken");
+TEST_CASE("network client completes documented handshake against test server", "[net]") {
+    ScopedProtocolServer server(7777, "taken");
     if (!server.Running()) {
         SKIP("Local ENet server could not bind in this environment");
     }
@@ -307,29 +495,49 @@ TEST_CASE("network client completes local handshake against test server", "[net]
 
     REQUIRE(client.SessionActive());
     REQUIRE(client.State() == ashpaw::engine::net::ConnectionState::Active);
+    const auto status = client.Status();
+    REQUIRE(status.serverTickRate == 20);
+    REQUIRE(status.controlledEntityId > 0);
+
     const auto sessionInit = client.ConsumeSessionInit();
     REQUIRE(sessionInit.has_value());
-    REQUIRE(sessionInit->playerEntityId == 1001);
-    REQUIRE(sessionInit->playerName == "Prowler");
-    REQUIRE(sessionInit->mapName == "starter_meadow");
+    REQUIRE(sessionInit->entityId == status.controlledEntityId);
     REQUIRE(sessionInit->spawnX == Catch::Approx(160.0F));
-    REQUIRE(sessionInit->spawnY == Catch::Approx(160.0F));
 
-    const auto initialMessages = client.ConsumeServerMessages();
-    REQUIRE(initialMessages.size() == 1);
-    REQUIRE(initialMessages.front().kind == ashpaw::engine::net::ServerMessageKind::Spawn);
-    REQUIRE(initialMessages.front().entity.has_value());
-    REQUIRE(initialMessages.front().entity->entityId == 1001);
+    bool sawSpawn = false;
+    bool sawIdentity = false;
+    bool sawObjectState = false;
+    for (int attempt = 0; attempt < 20 && !(sawSpawn && sawIdentity && sawObjectState); ++attempt) {
+        client.Tick(10);
+        for (const auto& message : client.ConsumeServerMessages()) {
+            if (message.kind == ashpaw::engine::net::ServerMessageKind::Spawn && message.entity.has_value()) {
+                sawSpawn = true;
+                REQUIRE(message.entity->entityId == status.controlledEntityId);
+            }
+            if (message.kind == ashpaw::engine::net::ServerMessageKind::IdentityUpdate && message.identityUpdate.has_value()) {
+                sawIdentity = true;
+                REQUIRE(message.identityUpdate->displayName == "Prowler");
+            }
+            if (message.kind == ashpaw::engine::net::ServerMessageKind::ObjectStateUpdate && message.objectStateUpdate.has_value()) {
+                sawObjectState = true;
+                REQUIRE(message.objectStateUpdate->targetId == "welcome_stone");
+                REQUIRE(message.objectStateUpdate->occupantEntityId == 0);
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(sawSpawn);
+    REQUIRE(sawIdentity);
+    REQUIRE(sawObjectState);
 
     client.SendMovementIntent({.x = 1.0F, .y = 0.0F});
     bool receivedSnapshot = false;
     for (int attempt = 0; attempt < 50; ++attempt) {
         client.Tick(10);
         const auto updates = client.ConsumeServerMessages();
-        if (!updates.empty()) {
-            REQUIRE(updates.front().kind == ashpaw::engine::net::ServerMessageKind::Snapshot);
-            REQUIRE(updates.front().entity.has_value());
-            REQUIRE(updates.front().entity->x == Catch::Approx(168.0F));
+        if (!updates.empty() && updates.front().kind == ashpaw::engine::net::ServerMessageKind::Snapshot) {
+            REQUIRE(updates.front().snapshotEntities.size() == 1);
+            REQUIRE(updates.front().snapshotEntities.front().x == Catch::Approx(168.0F));
             receivedSnapshot = true;
             break;
         }
@@ -337,11 +545,42 @@ TEST_CASE("network client completes local handshake against test server", "[net]
     }
     REQUIRE(receivedSnapshot);
 
+    client.SendInteractionRequest({.targetId = "welcome_stone"});
+    bool receivedInteractionResult = false;
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        client.Tick(10);
+        const auto updates = client.ConsumeServerMessages();
+        if (!updates.empty() && updates.front().kind == ashpaw::engine::net::ServerMessageKind::InteractionResult) {
+            REQUIRE(updates.front().interactionResult.has_value());
+            REQUIRE(updates.front().interactionResult->status == ashpaw::engine::net::InteractionStatus::Success);
+            receivedInteractionResult = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(receivedInteractionResult);
+
+    client.SendChatMessage("Hello meadow");
+    bool receivedChat = false;
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        client.Tick(10);
+        const auto updates = client.ConsumeServerMessages();
+        if (!updates.empty() && updates.front().kind == ashpaw::engine::net::ServerMessageKind::ChatBroadcast) {
+            REQUIRE(updates.front().chatBroadcast.has_value());
+            REQUIRE(updates.front().chatBroadcast->displayName == "Prowler");
+            REQUIRE(updates.front().chatBroadcast->message == "Hello meadow");
+            receivedChat = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(receivedChat);
+
     client.Shutdown();
 }
 
 TEST_CASE("network client reports rejected handshake from test server", "[net]") {
-    ScopedEnetServer server(7778, "taken");
+    ScopedProtocolServer server(7778, "taken");
     if (!server.Running()) {
         SKIP("Local ENet server could not bind in this environment");
     }
@@ -368,6 +607,67 @@ TEST_CASE("network client reports rejected handshake from test server", "[net]")
     client.Shutdown();
 }
 
+TEST_CASE("network client reconnects with persisted authoritative identity", "[net]") {
+    ScopedProtocolServer server(7779, "taken");
+    if (!server.Running()) {
+        SKIP("Local ENet server could not bind in this environment");
+    }
+
+    ashpaw::engine::net::NetworkClient firstClient;
+    REQUIRE(firstClient.Initialize());
+    REQUIRE(firstClient.Connect({
+        .host = "127.0.0.1",
+        .port = server.Port(),
+        .playerName = "  Prowler!!  ",
+        .connectTimeoutMs = 1000,
+        .handshakeTimeoutMs = 1000
+    }));
+
+    for (int attempt = 0; attempt < 50 && !firstClient.SessionActive(); ++attempt) {
+        firstClient.Tick(10);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    REQUIRE(firstClient.SessionActive());
+    auto firstSession = firstClient.ConsumeSessionInit();
+    REQUIRE(firstSession.has_value());
+    REQUIRE(firstSession->spawnX == Catch::Approx(160.0F));
+
+    firstClient.SendMovementIntent({.x = 1.0F, .y = 0.0F});
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        firstClient.Tick(10);
+        const auto updates = firstClient.ConsumeServerMessages();
+        if (!updates.empty() && updates.front().kind == ashpaw::engine::net::ServerMessageKind::Snapshot) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    firstClient.Shutdown();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    ashpaw::engine::net::NetworkClient secondClient;
+    REQUIRE(secondClient.Initialize());
+    REQUIRE(secondClient.Connect({
+        .host = "127.0.0.1",
+        .port = server.Port(),
+        .playerName = "Prowler",
+        .connectTimeoutMs = 1000,
+        .handshakeTimeoutMs = 1000
+    }));
+
+    for (int attempt = 0; attempt < 50 && !secondClient.SessionActive(); ++attempt) {
+        secondClient.Tick(10);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    REQUIRE(secondClient.SessionActive());
+    const auto secondSession = secondClient.ConsumeSessionInit();
+    REQUIRE(secondSession.has_value());
+    REQUIRE(secondSession->spawnX == Catch::Approx(168.0F));
+
+    secondClient.Shutdown();
+}
+
 TEST_CASE("camera converts world coordinates to screen coordinates", "[camera]") {
     ashpaw::engine::camera::Camera2D camera;
     camera.SetViewport(400.0F, 300.0F);
@@ -390,7 +690,7 @@ TEST_CASE("snapshot buffer interpolates between samples", "[prediction]") {
     REQUIRE(sample->y == Catch::Approx(10.0F));
 }
 
-TEST_CASE("client world tracks entities by authoritative id", "[world]") {
+TEST_CASE("client world tracks authoritative entities identities and interactables", "[world]") {
     ashpaw::engine::world::ClientWorld world;
     world.SetLocalPlayerId(7);
     world.SetSceneInfo({
@@ -403,7 +703,7 @@ TEST_CASE("client world tracks entities by authoritative id", "[world]") {
         .size = {32.0F, 32.0F},
         .color = {1.0F, 1.0F, 1.0F, 1.0F},
         .displayName = "tester",
-        .authoritative = false,
+        .authoritative = true,
         .renderLayer = ashpaw::engine::world::RenderLayer::Actors,
         .labelOffset = {0.0F, -18.0F}
     });
@@ -417,13 +717,23 @@ TEST_CASE("client world tracks entities by authoritative id", "[world]") {
         .renderLayer = ashpaw::engine::world::RenderLayer::Grounded,
         .labelOffset = {0.0F, -18.0F}
     });
+    world.UpsertIdentity({
+        .entityId = 7,
+        .displayName = "Scout"
+    });
+    world.UpsertInteractable({
+        .targetId = "welcome_stone",
+        .isOpen = false,
+        .occupantEntityId = 0
+    });
 
-    const auto entity = world.FindEntity(7);
-    REQUIRE(entity.has_value());
-    REQUIRE(entity->displayName == "tester");
+    REQUIRE(world.FindEntity(7).has_value());
+    REQUIRE(world.FindIdentity(7).has_value());
+    REQUIRE(world.FindIdentity(7)->displayName == "Scout");
+    REQUIRE(world.FindInteractable("welcome_stone").has_value());
+    REQUIRE(world.FindInteractable("welcome_stone")->occupantEntityId == 0);
     REQUIRE(world.LocalPlayerId() == 7);
     REQUIRE(world.SceneInfo().mapName == "meadow");
-    REQUIRE(world.EntityCount() == 2);
 
     const auto sorted = world.SortedEntities();
     REQUIRE(sorted.size() == 2);
@@ -442,7 +752,7 @@ TEST_CASE("map loader parses visual and collision data", "[assets]") {
     REQUIRE(map.layers[1].drawOrder == ashpaw::engine::assets::LayerDrawOrder::Midground);
     REQUIRE(map.layers.back().drawOrder == ashpaw::engine::assets::LayerDrawOrder::Foreground);
     REQUIRE_FALSE(map.blockers.empty());
-    REQUIRE(map.markers.size() == 2);
-    REQUIRE(map.markers.front().label == "Guide Post");
+    REQUIRE(map.markers.size() == 3);
+    REQUIRE(map.markers.front().label == "Welcome Stone");
     REQUIRE(map.worldSize.x == Catch::Approx(1600.0F));
 }

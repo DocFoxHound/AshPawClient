@@ -9,7 +9,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(ASHPAW_BUILD_TESTS "Build AshPaw test suite" ON)
 option(ASHPAW_ENABLE_WARNINGS "Enable strict compiler warnings" ON)
 option(ASHPAW_BUILD_CLIENT "Build the OpenGL client and engine targets" ON)
-option(ASHPAW_BUILD_HANDSHAKE_SERVER "Build the development handshake responder" ON)
 
 include(FetchContent)
 
@@ -133,9 +132,8 @@ if(ASHPAW_BUILD_CLIENT)
         engine/src/camera/Camera2D.cpp
         engine/src/config/Config.cpp
         engine/src/input/InputSystem.cpp
-        engine/src/net/HandshakeProtocol.cpp
         engine/src/net/NetworkClient.cpp
-        engine/src/net/TemporaryProtocol.cpp
+        engine/src/net/Protocol.cpp
         engine/src/platform/PlatformContext.cpp
         engine/src/render/RenderSystem.cpp
         engine/src/ui/UiLayer.cpp
@@ -173,27 +171,9 @@ if(ASHPAW_BUILD_CLIENT)
     ashpaw_enable_warnings(ashpaw_client)
 
     target_compile_definitions(ashpaw_client PRIVATE ASHPAW_DEFAULT_CONFIG_PATH="assets/config/client.json")
-endif()
 
-if(ASHPAW_BUILD_HANDSHAKE_SERVER)
-    add_executable(ashpaw_handshake_server
-        tools/handshake_server/main.cpp
-        engine/src/net/HandshakeProtocol.cpp
-        engine/src/net/TemporaryProtocol.cpp
-        engine/src/util/Log.cpp
-    )
-    target_include_directories(ashpaw_handshake_server
-        PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/engine/include
-            ${enet_SOURCE_DIR}/include
-    )
-    target_link_libraries(ashpaw_handshake_server
-        PRIVATE
-            enet
-            nlohmann_json::nlohmann_json
-            spdlog::spdlog
-    )
-    ashpaw_enable_warnings(ashpaw_handshake_server)
+    install(TARGETS ashpaw_client RUNTIME DESTINATION bin)
+    install(DIRECTORY assets/ DESTINATION share/ashpaw_client/assets)
 endif()
 
 if(ASHPAW_BUILD_CLIENT AND ASHPAW_BUILD_TESTS)
@@ -210,3 +190,18 @@ if(ASHPAW_BUILD_CLIENT AND ASHPAW_BUILD_TESTS)
     include(Catch)
     catch_discover_tests(ashpaw_tests)
 endif()
+
+install(FILES README.md DESTINATION share/ashpaw_client)
+install(DIRECTORY docs/ DESTINATION share/ashpaw_client/docs)
+
+set(CPACK_PACKAGE_NAME "AshPawClient")
+set(CPACK_PACKAGE_VENDOR "AshPaw")
+set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Cross-platform client for the AshPaw multiplayer RPG")
+set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
+if(WIN32)
+    set(CPACK_GENERATOR "ZIP")
+else()
+    set(CPACK_GENERATOR "TGZ")
+endif()
+include(CPack)

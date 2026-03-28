@@ -92,6 +92,14 @@
   ],
   "markers": [
     {
+      "id": "welcome_stone",
+      "type": "signpost",
+      "label": "Welcome Stone",
+      "x": 240.0,
+      "y": 180.0,
+      "color": [0.83, 0.80, 0.63, 1.0]
+    },
+    {
       "id": "guide_spawn",
       "type": "npc_anchor",
       "label": "Guide Post",

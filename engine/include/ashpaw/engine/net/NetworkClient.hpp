@@ -1,12 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <queue>
 #include <string>
 
-#include "ashpaw/engine/net/HandshakeProtocol.hpp"
-#include "ashpaw/engine/net/TemporaryProtocol.hpp"
+#include "ashpaw/engine/net/Protocol.hpp"
 
 #include <enet/enet.h>
 
@@ -15,7 +15,8 @@ namespace ashpaw::engine::net {
 enum class ConnectionState {
     Disconnected,
     Connecting,
-    Handshaking,
+    WaitingForServerHello,
+    WaitingForJoinAccepted,
     Active,
     Disconnecting
 };
@@ -35,7 +36,13 @@ struct ConnectionStatus {
     std::string playerName {"Local Prowler"};
     std::string detailMessage {"Idle"};
     std::string lastError;
-    std::optional<SessionInitData> sessionInit;
+    std::optional<JoinAcceptedData> sessionInit;
+    std::uint16_t serverTickRate {0};
+    std::uint32_t sessionId {0};
+    std::uint32_t controlledEntityId {0};
+    std::uint32_t pingMs {0};
+    std::uint64_t packetsSent {0};
+    std::uint64_t packetsReceived {0};
 };
 
 class NetworkClient {
@@ -52,8 +59,11 @@ public:
     [[nodiscard]] ConnectionState State() const;
     [[nodiscard]] ConnectionStatus Status() const;
     [[nodiscard]] bool SessionActive() const;
-    [[nodiscard]] std::optional<SessionInitData> ConsumeSessionInit();
+    [[nodiscard]] std::optional<JoinAcceptedData> ConsumeSessionInit();
     void SendMovementIntent(const MovementIntent& intent);
+    void SendInteractionRequest(const InteractionRequest& request);
+    void SendChatMessage(std::string_view body);
+    [[nodiscard]] std::vector<std::string> PacketLog() const;
     [[nodiscard]] std::vector<ServerMessage> ConsumeServerMessages();
 
 private:
@@ -61,7 +71,9 @@ private:
     static void ReleaseEnet();
     void SetState(ConnectionState state, std::string detailMessage);
     void HandleConnected();
-    void HandlePacket(const ENetPacket& packet);
+    void HandlePacket(const ENetPacket& packet, std::uint8_t channelId);
+    void RecordPacket(std::string_view direction, std::uint8_t channelId, std::string_view payload);
+    void QueueServerMessage(ServerMessage message);
     void ResetPeer();
 
     ENetHost* clientHost_ {nullptr};
@@ -69,6 +81,7 @@ private:
     ConnectionConfig config_ {};
     ConnectionStatus status_ {};
     std::queue<ServerMessage> serverMessages_ {};
+    std::deque<std::string> packetLog_ {};
     bool initialized_ {false};
     bool enetInitialized_ {false};
     std::uint32_t connectStartTicks_ {0};
