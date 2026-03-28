@@ -6,6 +6,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include "ashpaw/client/ClientApp.hpp"
 #include "ashpaw/engine/assets/AssetManager.hpp"
 #include "ashpaw/engine/camera/Camera2D.hpp"
 #include "ashpaw/engine/config/Config.hpp"
@@ -307,7 +308,7 @@ TEST_CASE("config saves and reloads persistence-facing fields", "[config]") {
         .vsync = false,
         .masterVolumePercent = 65,
         .assetRoot = "assets",
-        .mapPath = "maps/test_map.json",
+        .mapPath = "maps/dev_meadow.json",
         .serverHost = "127.0.0.1",
         .serverPort = 8888,
         .playerName = "Saved Prowler",
@@ -470,6 +471,15 @@ TEST_CASE("input mapping respects UI capture", "[input]") {
     REQUIRE(capturedSnapshot.openChatPressed);
     REQUIRE(capturedSnapshot.dismissUiPressed);
     REQUIRE_FALSE(capturedSnapshot.quitRequested);
+}
+
+TEST_CASE("client interaction range mirrors the server contract", "[client]") {
+    using ashpaw::engine::math::Vector2;
+
+    REQUIRE(ashpaw::client::IsWithinInteractionRange({64.0F, 64.0F}, {144.0F, 64.0F}));
+    REQUIRE(ashpaw::client::IsWithinInteractionRange({64.0F, 64.0F}, {64.0F, 144.0F}));
+    REQUIRE_FALSE(ashpaw::client::IsWithinInteractionRange({64.0F, 64.0F}, {144.1F, 64.0F}));
+    REQUIRE_FALSE(ashpaw::client::IsWithinInteractionRange({64.0F, 64.0F}, {64.0F, 144.1F}));
 }
 
 TEST_CASE("network client completes documented handshake against test server", "[net]") {
@@ -744,15 +754,21 @@ TEST_CASE("client world tracks authoritative entities identities and interactabl
 TEST_CASE("map loader parses visual and collision data", "[assets]") {
     ashpaw::engine::assets::AssetManager assets;
     assets.SetAssetRoot("../assets");
-    const auto map = assets.LoadMap("maps/test_map.json");
+    const auto map = assets.LoadMap("maps/dev_meadow.json");
 
-    REQUIRE(map.name == "starter_meadow");
+    REQUIRE(map.name == "dev_meadow");
     REQUIRE(map.layers.size() == 3);
     REQUIRE(map.layers.front().drawOrder == ashpaw::engine::assets::LayerDrawOrder::Background);
     REQUIRE(map.layers[1].drawOrder == ashpaw::engine::assets::LayerDrawOrder::Midground);
     REQUIRE(map.layers.back().drawOrder == ashpaw::engine::assets::LayerDrawOrder::Foreground);
     REQUIRE_FALSE(map.blockers.empty());
-    REQUIRE(map.markers.size() == 3);
-    REQUIRE(map.markers.front().label == "Welcome Stone");
-    REQUIRE(map.worldSize.x == Catch::Approx(1600.0F));
+    REQUIRE(map.markers.size() == 4);
+    REQUIRE(map.markers[0].id == "inn_door");
+    REQUIRE(map.markers[1].id == "town_sign");
+    REQUIRE(map.markers[2].id == "camp_seat");
+    REQUIRE(map.markers[3].id == "berry_crate");
+    REQUIRE(map.spawnPoint.x == Catch::Approx(64.0F));
+    REQUIRE(map.spawnPoint.y == Catch::Approx(64.0F));
+    REQUIRE(map.worldSize.x == Catch::Approx(320.0F));
+    REQUIRE(map.worldSize.y == Catch::Approx(320.0F));
 }

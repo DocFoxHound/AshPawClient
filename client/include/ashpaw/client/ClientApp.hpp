@@ -21,6 +21,13 @@
 
 namespace ashpaw::client {
 
+[[nodiscard]] inline bool IsWithinInteractionRange(const engine::math::Vector2& source, const engine::math::Vector2& target) {
+    constexpr float interactionRange = 80.0F;
+    const auto dx = source.x - target.x;
+    const auto dy = source.y - target.y;
+    return (dx * dx) + (dy * dy) <= (interactionRange * interactionRange);
+}
+
 struct ClientChatEntry {
     std::uint64_t speakerEntityId {0};
     std::string speaker;

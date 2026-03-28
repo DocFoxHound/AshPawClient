@@ -18,7 +18,7 @@ namespace {
 constexpr engine::world::EntityId kLocalPlayerId = 1;
 constexpr engine::math::Vector2 kPlayerSize {36.0F, 36.0F};
 constexpr double kInterpolationDelaySeconds = 0.10;
-constexpr float kInteractionRange = 96.0F;
+constexpr float kInteractionRange = 80.0F;
 constexpr double kInteractionResultDurationSeconds = 4.0;
 constexpr std::size_t kMaxChatMessages = 48;
 
@@ -354,6 +354,9 @@ std::optional<ActiveInteractableTarget> ClientApp::FindInteractionTarget() const
     auto nearestDistanceSquared = kInteractionRange * kInteractionRange;
     for (const auto& marker : currentMap_.markers) {
         if (!IsMarkerAuthoritativeInteractable(marker)) {
+            continue;
+        }
+        if (!IsWithinInteractionRange(playerCenter, marker.position)) {
             continue;
         }
         const auto distanceSquared = SquaredDistance(playerCenter, marker.position);

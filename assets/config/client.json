@@ -5,7 +5,7 @@
   "vsync": true,
   "master_volume_percent": 100,
   "asset_root": "assets",
-  "map_path": "maps/test_map.json",
+  "map_path": "maps/dev_meadow.json",
   "server_host": "127.0.0.1",
   "server_port": 7777,
   "player_name": "Local Prowler",
