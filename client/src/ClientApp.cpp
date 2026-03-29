@@ -40,11 +40,15 @@ const char* ToString(engine::net::ConnectionState state) {
     return "unknown";
 }
 
-engine::net::ConnectionConfig ToConnectionConfig(const engine::config::AppConfig& config) {
+engine::net::ConnectionConfig ToConnectionConfig(
+    const engine::config::AppConfig& config,
+    const engine::net::PackageMetadata& packageMetadata
+) {
     return {
         .host = config.serverHost,
         .port = static_cast<std::uint16_t>(config.serverPort),
         .playerName = config.playerName,
+        .localPackage = packageMetadata,
         .connectTimeoutMs = static_cast<std::uint32_t>(config.connectTimeoutMs),
         .handshakeTimeoutMs = static_cast<std::uint32_t>(config.handshakeTimeoutMs)
     };
@@ -99,6 +103,17 @@ bool ClientApp::Initialize(const std::filesystem::path& configPath) {
     configPath_ = configPath;
     config_ = engine::config::Config::LoadFromFile(configPath);
     engine::util::InitializeLogger(config_.logLevel);
+    engine::util::Logger()->info("Loading client config from {}", configPath_.string());
+    engine::util::Logger()->info(
+        "Config summary: map='{}' asset_root='{}' player='{}' auto_connect={} server={}:{} debug_overlay={}",
+        config_.mapPath,
+        config_.assetRoot,
+        config_.playerName,
+        config_.autoConnect,
+        config_.serverHost,
+        config_.serverPort,
+        config_.showDebugOverlay
+    );
     debugOverlayVisible_ = config_.showDebugOverlay;
     CopyStringToBuffer(config_.playerName, requestedNameBuffer_);
 
@@ -112,10 +127,12 @@ bool ClientApp::Initialize(const std::filesystem::path& configPath) {
 
     renderer_.Initialize(platform_.Window(), config_.vsync);
     ui_.Initialize(platform_.Window(), SDL_GL_GetCurrentContext());
+    engine::util::Logger()->info("UI layer initialized");
     assetManager_.SetAssetRoot(config_.assetRoot);
     if (!network_.Initialize()) {
         throw std::runtime_error("Failed to initialize network client");
     }
+    engine::util::Logger()->info("Network layer initialized");
 
     LoadScene();
     if (config_.autoConnect) {
@@ -124,6 +141,14 @@ bool ClientApp::Initialize(const std::filesystem::path& configPath) {
     running_ = true;
     engine::util::Logger()->info("Client initialized");
     return true;
+}
+
+engine::net::PackageMetadata ClientApp::LocalPackageMetadata() const {
+    return {
+        .mapId = currentPackageManifest_.mapId,
+        .packageVersion = currentPackageManifest_.packageVersion,
+        .contentHash = currentPackageManifest_.contentHash
+    };
 }
 
 int ClientApp::Run() {
@@ -166,7 +191,7 @@ void ClientApp::BeginConnection() {
         return;
     }
     connectAttempted_ = true;
-    const auto connectionConfig = ToConnectionConfig(config_);
+    const auto connectionConfig = ToConnectionConfig(config_, LocalPackageMetadata());
     if (network_.Connect(connectionConfig)) {
         engine::util::Logger()->info("Connecting to {}:{} as {}", config_.serverHost, config_.serverPort, config_.playerName);
     } else {
@@ -205,11 +230,13 @@ void ClientApp::PersistConfig() {
 
 void ClientApp::ReloadCurrentMap() {
     try {
+        currentPackageManifest_ = assetManager_.LoadPackageManifestForMap(config_.mapPath);
         currentMap_ = assetManager_.LoadMap(config_.mapPath);
         camera_.SetWorldBounds(currentMap_.worldSize.x, currentMap_.worldSize.y);
         auto sceneInfo = world_.SceneInfo();
         sceneInfo.mapName = currentMap_.name;
         sceneInfo.worldSize = currentMap_.worldSize;
+        sceneInfo.activeZ = currentMap_.spawnZ;
         world_.SetSceneInfo(sceneInfo);
         config_.cachedLastMap = currentMap_.name;
         assetStatusMessage_ = "Reloaded " + config_.mapPath;
@@ -226,12 +253,25 @@ double ClientApp::CurrentTimeSeconds() const {
 }
 
 void ClientApp::LoadScene() {
+    currentPackageManifest_ = assetManager_.LoadPackageManifestForMap(config_.mapPath);
     currentMap_ = assetManager_.LoadMap(config_.mapPath);
+    engine::util::Logger()->info(
+        "Loaded map '{}' with {} layers, {} markers, {} blockers, world={}x{}, spawn=({}, {})",
+        currentMap_.name,
+        currentMap_.layers.size(),
+        currentMap_.markers.size(),
+        currentMap_.blockers.size(),
+        currentMap_.worldSize.x,
+        currentMap_.worldSize.y,
+        currentMap_.spawnPoint.x,
+        currentMap_.spawnPoint.y
+    );
     camera_.SetViewport(static_cast<float>(config_.windowWidth), static_cast<float>(config_.windowHeight));
     camera_.SetWorldBounds(currentMap_.worldSize.x, currentMap_.worldSize.y);
     world_.SetSceneInfo({
         .mapName = currentMap_.name,
-        .worldSize = currentMap_.worldSize
+        .worldSize = currentMap_.worldSize,
+        .activeZ = currentMap_.spawnZ
     });
 
     world_.SetLocalPlayerId(kLocalPlayerId);
@@ -255,6 +295,7 @@ void ClientApp::LoadScene() {
     world_.UpsertEntity({
         .id = kLocalPlayerId,
         .position = currentMap_.spawnPoint,
+        .z = currentMap_.spawnZ,
         .size = kPlayerSize,
         .color = {0.82F, 0.71F, 0.31F, 0.45F},
         .displayName = "Waiting for session",
@@ -290,6 +331,7 @@ void ClientApp::SyncSessionState() {
             world_.UpsertEntity({
                 .id = sessionInit->entityId,
                 .position = {sessionInit->spawnX, sessionInit->spawnY},
+                .z = sessionInit->spawnZ,
                 .size = kPlayerSize,
                 .color = EntityColor(true),
                 .displayName = config_.cachedAuthoritativeName.empty() ? "Joining..." : config_.cachedAuthoritativeName,
@@ -353,6 +395,9 @@ std::optional<ActiveInteractableTarget> ClientApp::FindInteractionTarget() const
     std::optional<ActiveInteractableTarget> nearestMarker;
     auto nearestDistanceSquared = kInteractionRange * kInteractionRange;
     for (const auto& marker : currentMap_.markers) {
+        if (marker.z != localPlayer->z) {
+            continue;
+        }
         if (!IsMarkerAuthoritativeInteractable(marker)) {
             continue;
         }
@@ -396,6 +441,7 @@ void ClientApp::ApplyServerMessages() {
                 world_.UpsertEntity({
                     .id = entity.entityId,
                     .position = {entity.x, entity.y},
+                    .z = entity.z,
                     .size = kPlayerSize,
                     .color = EntityColor(isLocalEntity),
                     .displayName = identity.has_value() ? identity->displayName : "",
@@ -408,6 +454,10 @@ void ClientApp::ApplyServerMessages() {
                         .timestampSeconds = nowSeconds,
                         .position = {entity.x, entity.y}
                     });
+                } else {
+                    auto sceneInfo = world_.SceneInfo();
+                    sceneInfo.activeZ = entity.z;
+                    world_.SetSceneInfo(sceneInfo);
                 }
             }
             break;
@@ -417,6 +467,7 @@ void ClientApp::ApplyServerMessages() {
                 auto worldEntity = world_.FindEntity(entity.entityId).value_or(engine::world::EntityPresentation {
                     .id = entity.entityId,
                     .position = {entity.x, entity.y},
+                    .z = entity.z,
                     .size = kPlayerSize,
                     .color = EntityColor(isLocalEntity),
                     .displayName = world_.FindIdentity(entity.entityId).has_value()
@@ -428,9 +479,13 @@ void ClientApp::ApplyServerMessages() {
                 });
                 worldEntity.color = EntityColor(isLocalEntity);
                 worldEntity.authoritative = true;
+                worldEntity.z = entity.z;
                 if (isLocalEntity) {
                     worldEntity.position = {entity.x, entity.y};
                     world_.UpsertEntity(worldEntity);
+                    auto sceneInfo = world_.SceneInfo();
+                    sceneInfo.activeZ = entity.z;
+                    world_.SetSceneInfo(sceneInfo);
                 } else {
                     world_.UpsertEntity(worldEntity);
                     remoteSnapshotBuffers_[entity.entityId].Push({
@@ -629,16 +684,31 @@ void ClientApp::Render(float deltaSeconds) {
     int width = 0;
     int height = 0;
     SDL_GetWindowSize(platform_.Window(), &width, &height);
+    static bool firstFrameSummaryLogged = false;
+    if (!firstFrameSummaryLogged) {
+        firstFrameSummaryLogged = true;
+        const auto sortedEntities = world_.SortedEntities();
+        engine::util::Logger()->info(
+            "First render frame: window={}x{} map='{}' entities={} markers={} debug_overlay={}",
+            width,
+            height,
+            currentMap_.name,
+            sortedEntities.size(),
+            currentMap_.markers.size(),
+            debugOverlayVisible_
+        );
+    }
 
     renderer_.BeginFrame(width, height);
     ui_.BeginFrame();
     const auto sortedEntities = world_.SortedEntities();
     const auto localPlayer = world_.FindEntity(world_.LocalPlayerId());
-    renderer_.RenderMapLayers(currentMap_, camera_, engine::assets::LayerDrawOrder::Background);
-    renderer_.RenderMapLayers(currentMap_, camera_, engine::assets::LayerDrawOrder::Midground);
-    renderer_.RenderMarkers(currentMap_.markers, camera_);
-    renderer_.RenderEntities(sortedEntities, camera_);
-    renderer_.RenderMapLayers(currentMap_, camera_, engine::assets::LayerDrawOrder::Foreground);
+    const auto sceneInfo = world_.SceneInfo();
+    renderer_.RenderMapLayers(currentMap_, camera_, engine::assets::LayerDrawOrder::Background, sceneInfo.activeZ);
+    renderer_.RenderMapLayers(currentMap_, camera_, engine::assets::LayerDrawOrder::Midground, sceneInfo.activeZ);
+    renderer_.RenderMarkers(currentMap_.markers, camera_, sceneInfo.activeZ);
+    renderer_.RenderEntities(sortedEntities, camera_, sceneInfo.activeZ);
+    renderer_.RenderMapLayers(currentMap_, camera_, engine::assets::LayerDrawOrder::Foreground, sceneInfo.activeZ);
     if (showCollisionDebug_) {
         renderer_.RenderCollisionDebug(currentMap_.blockers, camera_);
     }
@@ -658,7 +728,6 @@ void ClientApp::Render(float deltaSeconds) {
     ui_.RenderEntityLabels(sortedEntities, camera_);
 
     const auto fps = deltaSeconds > 0.0F ? 1.0F / deltaSeconds : 0.0F;
-    const auto sceneInfo = world_.SceneInfo();
     const auto networkStatus = network_.Status();
     ui_.RenderConnectionPanel({
         .visible = !sessionActive_,

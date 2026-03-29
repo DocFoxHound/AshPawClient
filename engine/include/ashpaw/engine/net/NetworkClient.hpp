@@ -25,6 +25,7 @@ struct ConnectionConfig {
     std::string host {"127.0.0.1"};
     std::uint16_t port {7777};
     std::string playerName {"Local Prowler"};
+    PackageMetadata localPackage {};
     std::uint32_t connectTimeoutMs {2500};
     std::uint32_t handshakeTimeoutMs {2500};
 };
@@ -37,6 +38,8 @@ struct ConnectionStatus {
     std::string detailMessage {"Idle"};
     std::string lastError;
     std::optional<JoinAcceptedData> sessionInit;
+    PackageMetadata serverPackage {};
+    bool packageDownloadRequired {false};
     std::uint16_t serverTickRate {0};
     std::uint32_t sessionId {0};
     std::uint32_t controlledEntityId {0};

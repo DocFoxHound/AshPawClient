@@ -1,8 +1,37 @@
 #include "ashpaw/engine/render/RenderSystem.hpp"
 
+#include <string_view>
+
 #include <SDL_opengl.h>
 
+#include "ashpaw/engine/util/Log.hpp"
+
 namespace ashpaw::engine::render {
+
+namespace {
+
+const char* GlErrorToString(GLenum error) {
+    switch (error) {
+    case GL_NO_ERROR:
+        return "GL_NO_ERROR";
+    case GL_INVALID_ENUM:
+        return "GL_INVALID_ENUM";
+    case GL_INVALID_VALUE:
+        return "GL_INVALID_VALUE";
+    case GL_INVALID_OPERATION:
+        return "GL_INVALID_OPERATION";
+    case GL_STACK_OVERFLOW:
+        return "GL_STACK_OVERFLOW";
+    case GL_STACK_UNDERFLOW:
+        return "GL_STACK_UNDERFLOW";
+    case GL_OUT_OF_MEMORY:
+        return "GL_OUT_OF_MEMORY";
+    default:
+        return "GL_UNKNOWN_ERROR";
+    }
+}
+
+}
 
 bool RenderSystem::Initialize(SDL_Window* window, bool vsync) {
     static_cast<void>(window);
@@ -12,12 +41,25 @@ bool RenderSystem::Initialize(SDL_Window* window, bool vsync) {
     glDisable(GL_CULL_FACE);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_BLEND);
+    const auto* vendor = reinterpret_cast<const char*>(glGetString(GL_VENDOR));
+    const auto* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
+    const auto* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    const auto* glslVersion = reinterpret_cast<const char*>(glGetString(GL_SHADING_LANGUAGE_VERSION));
+    util::Logger()->info("OpenGL vendor: {}", vendor != nullptr ? vendor : "(null)");
+    util::Logger()->info("OpenGL renderer: {}", renderer != nullptr ? renderer : "(null)");
+    util::Logger()->info("OpenGL version: {}", version != nullptr ? version : "(null)");
+    util::Logger()->info("GLSL version: {}", glslVersion != nullptr ? glslVersion : "(null)");
+    LogGlError("RenderSystem::Initialize");
     return true;
 }
 
 void RenderSystem::Shutdown() {}
 
 void RenderSystem::BeginFrame(int viewportWidth, int viewportHeight) {
+    if (!firstFrameLogged_) {
+        util::Logger()->info("Beginning first frame at {}x{}", viewportWidth, viewportHeight);
+        firstFrameLogged_ = true;
+    }
     glViewport(0, 0, viewportWidth, viewportHeight);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
@@ -26,15 +68,17 @@ void RenderSystem::BeginFrame(int viewportWidth, int viewportHeight) {
     glLoadIdentity();
     glClearColor(0.07F, 0.08F, 0.09F, 1.0F);
     glClear(GL_COLOR_BUFFER_BIT);
+    LogGlError("RenderSystem::BeginFrame");
 }
 
 void RenderSystem::RenderMapLayers(
     const assets::MapData& map,
     const camera::Camera2D& camera,
-    assets::LayerDrawOrder drawOrder
+    assets::LayerDrawOrder drawOrder,
+    std::int32_t activeZ
 ) const {
     for (const auto& layer : map.layers) {
-        if (layer.drawOrder != drawOrder) {
+        if (layer.drawOrder != drawOrder || layer.z != activeZ) {
             continue;
         }
         for (const auto& visual : layer.visuals) {
@@ -67,8 +111,11 @@ void RenderSystem::RenderCameraBoundsDebug(const math::Vector2& worldSize, const
     );
 }
 
-void RenderSystem::RenderEntities(const std::vector<world::EntityPresentation>& entities, const camera::Camera2D& camera) const {
+void RenderSystem::RenderEntities(const std::vector<world::EntityPresentation>& entities, const camera::Camera2D& camera, std::int32_t activeZ) const {
     for (const auto& entity : entities) {
+        if (entity.z != activeZ) {
+            continue;
+        }
         DrawWorldRect(
             {entity.position.x, entity.position.y, entity.size.x, entity.size.y},
             entity.color,
@@ -77,8 +124,11 @@ void RenderSystem::RenderEntities(const std::vector<world::EntityPresentation>& 
     }
 }
 
-void RenderSystem::RenderMarkers(const std::vector<assets::MapMarker>& markers, const camera::Camera2D& camera) const {
+void RenderSystem::RenderMarkers(const std::vector<assets::MapMarker>& markers, const camera::Camera2D& camera, std::int32_t activeZ) const {
     for (const auto& marker : markers) {
+        if (marker.z != activeZ) {
+            continue;
+        }
         DrawWorldRect(
             {marker.position.x - 10.0F, marker.position.y - 10.0F, 20.0F, 20.0F},
             marker.color,
@@ -88,7 +138,19 @@ void RenderSystem::RenderMarkers(const std::vector<assets::MapMarker>& markers, 
 }
 
 void RenderSystem::EndFrame(SDL_Window* window) const {
+    LogGlError("RenderSystem::EndFrame before swap");
     SDL_GL_SwapWindow(window);
+}
+
+void RenderSystem::LogGlError(std::string_view stage) const {
+    for (auto error = glGetError(); error != GL_NO_ERROR; error = glGetError()) {
+        if (loggedGlErrorCount_ < 12) {
+            util::Logger()->error("{} failed with {} ({})", stage, GlErrorToString(error), static_cast<unsigned int>(error));
+        } else if (loggedGlErrorCount_ == 12) {
+            util::Logger()->error("Additional OpenGL errors suppressed");
+        }
+        ++loggedGlErrorCount_;
+    }
 }
 
 void RenderSystem::DrawWorldRect(const math::Rect& rect, const math::Color& color, const camera::Camera2D& camera) {

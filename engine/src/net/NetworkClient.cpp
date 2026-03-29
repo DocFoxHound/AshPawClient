@@ -77,6 +77,8 @@ bool NetworkClient::Connect(const ConnectionConfig& config) {
     status_.playerName = SanitizeDisplayName(config.playerName);
     status_.lastError.clear();
     status_.sessionInit.reset();
+    status_.serverPackage = {};
+    status_.packageDownloadRequired = false;
     status_.serverTickRate = 0;
     status_.sessionId = 0;
     status_.controlledEntityId = 0;
@@ -276,7 +278,7 @@ void NetworkClient::HandleConnected() {
     handshakeStartTicks_ = SDL_GetTicks();
     SetState(ConnectionState::WaitingForServerHello, "Connected. Waiting for server hello");
 
-    const auto request = BuildClientHelloPacket(status_.playerName);
+    const auto request = BuildClientHelloPacket(status_.playerName, config_.localPackage);
     if (!request.has_value()) {
         status_.lastError = "Failed to build client hello";
         ResetPeer();
@@ -329,6 +331,15 @@ void NetworkClient::HandlePacket(const ENetPacket& packet, std::uint8_t channelI
             return;
         }
         status_.serverTickRate = parsed.serverHello->tickRate;
+        status_.serverPackage = PackageMetadata {
+            .mapId = parsed.serverHello->mapId,
+            .packageVersion = parsed.serverHello->packageVersion,
+            .contentHash = parsed.serverHello->contentHash
+        };
+        status_.packageDownloadRequired = parsed.serverHello->packageDownloadRequired;
+        if (parsed.serverHello->packageDownloadRequired) {
+            status_.lastError = "World package download required";
+        }
         SetState(ConnectionState::WaitingForJoinAccepted, "Server hello received. Waiting for join acceptance");
         return;
     }

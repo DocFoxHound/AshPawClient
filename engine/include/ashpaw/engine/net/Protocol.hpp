@@ -57,11 +57,18 @@ struct InteractionRequest {
 struct ServerHelloData {
     std::uint16_t protocolVersion {0};
     std::uint16_t tickRate {0};
+    std::string mapId;
+    std::string packageVersion;
+    std::string contentHash;
+    bool packageDownloadRequired {false};
 };
 
 struct ClientHelloData {
     std::uint16_t protocolVersion {0};
     std::string displayName;
+    std::string localMapId;
+    std::string localPackageVersion;
+    std::string localContentHash;
 };
 
 struct JoinAcceptedData {
@@ -69,6 +76,7 @@ struct JoinAcceptedData {
     std::uint32_t entityId {0};
     float spawnX {0.0F};
     float spawnY {0.0F};
+    std::int32_t spawnZ {0};
 };
 
 struct JoinRejectedData {
@@ -80,6 +88,13 @@ struct EntityTransformState {
     std::uint64_t entityId {0};
     float x {0.0F};
     float y {0.0F};
+    std::int32_t z {0};
+};
+
+struct PackageMetadata {
+    std::string mapId;
+    std::string packageVersion;
+    std::string contentHash;
 };
 
 struct InteractionResult {
@@ -159,7 +174,10 @@ struct ServerMessage {
 
 std::string SanitizeDisplayName(std::string_view rawName);
 
-std::optional<std::vector<std::uint8_t>> BuildClientHelloPacket(std::string_view displayName);
+std::optional<std::vector<std::uint8_t>> BuildClientHelloPacket(
+    std::string_view displayName,
+    const PackageMetadata& packageMetadata = {}
+);
 std::optional<std::vector<std::uint8_t>> BuildMovementInputPacket(const MovementIntent& intent);
 std::optional<std::vector<std::uint8_t>> BuildInteractionRequestPacket(const InteractionRequest& request);
 std::optional<std::vector<std::uint8_t>> BuildChatSendPacket(std::string_view message);

@@ -58,6 +58,7 @@ private:
     void ReloadCurrentMap();
     void RetryConnection();
     void LoadScene();
+    [[nodiscard]] engine::net::PackageMetadata LocalPackageMetadata() const;
     void SyncSessionState();
     void UpdateInteractionState();
     void UpdateInterpolatedEntities();
@@ -70,6 +71,7 @@ private:
     engine::platform::PlatformContext platform_ {};
     engine::render::RenderSystem renderer_ {};
     engine::assets::AssetManager assetManager_ {};
+    engine::assets::WorldPackageManifest currentPackageManifest_ {};
     engine::assets::MapData currentMap_ {};
     engine::input::InputSystem input_ {};
     engine::camera::Camera2D camera_ {};

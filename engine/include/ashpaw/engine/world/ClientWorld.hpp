@@ -22,11 +22,13 @@ enum class RenderLayer {
 struct WorldSceneInfo {
     std::string mapName;
     math::Vector2 worldSize {};
+    std::int32_t activeZ {0};
 };
 
 struct EntityPresentation {
     EntityId id {0};
     math::Vector2 position {};
+    std::int32_t z {0};
     math::Vector2 size {32.0F, 32.0F};
     math::Color color {};
     std::string displayName;

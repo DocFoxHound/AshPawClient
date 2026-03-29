@@ -45,6 +45,9 @@ std::vector<EntityPresentation> ClientWorld::SortedEntities() const {
         entities.push_back(entity);
     }
     std::sort(entities.begin(), entities.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.z != rhs.z) {
+            return lhs.z < rhs.z;
+        }
         if (lhs.renderLayer != rhs.renderLayer) {
             return static_cast<int>(lhs.renderLayer) < static_cast<int>(rhs.renderLayer);
         }

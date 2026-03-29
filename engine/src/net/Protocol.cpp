@@ -186,11 +186,15 @@ std::string SanitizeDisplayName(std::string_view rawName) {
     return sanitized;
 }
 
-std::optional<std::vector<std::uint8_t>> BuildClientHelloPacket(std::string_view displayName) {
+std::optional<std::vector<std::uint8_t>> BuildClientHelloPacket(std::string_view displayName, const PackageMetadata& packageMetadata) {
     std::vector<std::uint8_t> buffer;
     WriteU8(buffer, static_cast<std::uint8_t>(Opcode::ClientHello));
     WriteU16(buffer, kProtocolVersion);
-    if (!WriteString(buffer, displayName) || !IsPacketSizeValid(buffer)) {
+    if (!WriteString(buffer, displayName) ||
+        !WriteString(buffer, packageMetadata.mapId) ||
+        !WriteString(buffer, packageMetadata.packageVersion) ||
+        !WriteString(buffer, packageMetadata.contentHash) ||
+        !IsPacketSizeValid(buffer)) {
         return std::nullopt;
     }
     return buffer;
@@ -233,6 +237,10 @@ std::vector<std::uint8_t> BuildServerHelloPacket(const ServerHelloData& hello) {
     WriteU8(buffer, static_cast<std::uint8_t>(Opcode::ServerHello));
     WriteU16(buffer, hello.protocolVersion);
     WriteU16(buffer, hello.tickRate);
+    WriteString(buffer, hello.mapId);
+    WriteString(buffer, hello.packageVersion);
+    WriteString(buffer, hello.contentHash);
+    WriteU8(buffer, hello.packageDownloadRequired ? 1U : 0U);
     return buffer;
 }
 
@@ -243,6 +251,7 @@ std::vector<std::uint8_t> BuildJoinAcceptedPacket(const JoinAcceptedData& accept
     WriteU32(buffer, accepted.entityId);
     WriteF32(buffer, accepted.spawnX);
     WriteF32(buffer, accepted.spawnY);
+    WriteU32(buffer, static_cast<std::uint32_t>(accepted.spawnZ));
     return buffer;
 }
 
@@ -260,6 +269,7 @@ std::vector<std::uint8_t> BuildPlayerSpawnPacket(const EntityTransformState& ent
     WriteU32(buffer, static_cast<std::uint32_t>(entity.entityId));
     WriteF32(buffer, entity.x);
     WriteF32(buffer, entity.y);
+    WriteU32(buffer, static_cast<std::uint32_t>(entity.z));
     return buffer;
 }
 
@@ -278,6 +288,7 @@ std::vector<std::uint8_t> BuildTransformSnapshotPacket(const std::vector<EntityT
         WriteU32(buffer, static_cast<std::uint32_t>(entity.entityId));
         WriteF32(buffer, entity.x);
         WriteF32(buffer, entity.y);
+        WriteU32(buffer, static_cast<std::uint32_t>(entity.z));
     }
     return buffer;
 }
@@ -332,9 +343,16 @@ ParsedPacket ParsePacket(std::string_view payload) {
     switch (opcode) {
     case Opcode::ServerHello: {
         ServerHelloData hello;
-        if (!ReadU16(payload, offset, hello.protocolVersion) || !ReadU16(payload, offset, hello.tickRate)) {
+        std::uint8_t packageDownloadRequired = 0;
+        if (!ReadU16(payload, offset, hello.protocolVersion) ||
+            !ReadU16(payload, offset, hello.tickRate) ||
+            !ReadString(payload, offset, hello.mapId) ||
+            !ReadString(payload, offset, hello.packageVersion) ||
+            !ReadString(payload, offset, hello.contentHash) ||
+            !ReadU8(payload, offset, packageDownloadRequired)) {
             return InvalidPacket("Malformed server_hello");
         }
+        hello.packageDownloadRequired = packageDownloadRequired != 0U;
         if (offset != payload.size()) {
             return InvalidPacket("Unexpected trailing bytes in server_hello");
         }
@@ -351,6 +369,11 @@ ParsedPacket ParsePacket(std::string_view payload) {
             !ReadF32(payload, offset, accepted.spawnY)) {
             return InvalidPacket("Malformed join_accepted");
         }
+        std::uint32_t spawnZ = 0;
+        if (!ReadU32(payload, offset, spawnZ)) {
+            return InvalidPacket("Malformed join_accepted");
+        }
+        accepted.spawnZ = static_cast<std::int32_t>(spawnZ);
         if (offset != payload.size()) {
             return InvalidPacket("Unexpected trailing bytes in join_accepted");
         }
@@ -377,10 +400,13 @@ ParsedPacket ParsePacket(std::string_view payload) {
     case Opcode::PlayerSpawn: {
         EntityTransformState entity;
         std::uint32_t entityId = 0;
-        if (!ReadU32(payload, offset, entityId) || !ReadF32(payload, offset, entity.x) || !ReadF32(payload, offset, entity.y)) {
+        std::uint32_t z = 0;
+        if (!ReadU32(payload, offset, entityId) || !ReadF32(payload, offset, entity.x) || !ReadF32(payload, offset, entity.y) ||
+            !ReadU32(payload, offset, z)) {
             return InvalidPacket("Malformed player_spawn");
         }
         entity.entityId = entityId;
+        entity.z = static_cast<std::int32_t>(z);
         if (offset != payload.size()) {
             return InvalidPacket("Unexpected trailing bytes in player_spawn");
         }
@@ -413,10 +439,13 @@ ParsedPacket ParsePacket(std::string_view payload) {
         for (std::uint16_t index = 0; index < entityCount; ++index) {
             EntityTransformState entity;
             std::uint32_t entityId = 0;
-            if (!ReadU32(payload, offset, entityId) || !ReadF32(payload, offset, entity.x) || !ReadF32(payload, offset, entity.y)) {
+            std::uint32_t z = 0;
+            if (!ReadU32(payload, offset, entityId) || !ReadF32(payload, offset, entity.x) || !ReadF32(payload, offset, entity.y) ||
+                !ReadU32(payload, offset, z)) {
                 return InvalidPacket("Malformed transform_snapshot entity");
             }
             entity.entityId = entityId;
+            entity.z = static_cast<std::int32_t>(z);
             packet.snapshotEntities.push_back(entity);
         }
         if (offset != payload.size()) {
@@ -504,7 +533,11 @@ std::optional<ClientHelloData> ParseClientHelloPacket(std::string_view payload) 
 
     std::size_t offset = 1;
     ClientHelloData hello;
-    if (!ReadU16(payload, offset, hello.protocolVersion) || !ReadString(payload, offset, hello.displayName)) {
+    if (!ReadU16(payload, offset, hello.protocolVersion) ||
+        !ReadString(payload, offset, hello.displayName) ||
+        !ReadString(payload, offset, hello.localMapId) ||
+        !ReadString(payload, offset, hello.localPackageVersion) ||
+        !ReadString(payload, offset, hello.localContentHash)) {
         return std::nullopt;
     }
     if (offset != payload.size()) {

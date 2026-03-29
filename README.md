@@ -26,7 +26,18 @@ Platform notes:
 - Linux: on Fedora, install OpenGL/X11 development packages before configuring the client:
 
 ```bash
-sudo dnf install mesa-libGL-devel mesa-libEGL-devel libX11-devel libXext-devel libXcursor-devel libXi-devel libXinerama-devel libXrandr-devel libXrender-devel
+sudo dnf install mesa-libGL-devel mesa-libEGL-devel \
+  libX11-devel libXext-devel libXcursor-devel libXi-devel \
+  libXinerama-devel libXrandr-devel libXrender-devel libXfixes-devel \
+  libXxf86vm-devel alsa-lib-devel pipewire-devel pulseaudio-libs-devel
+```
+
+If you install additional Fedora development packages after an initial configure, delete `build/` and configure again so the vendored SDL dependency can rebuild with the newly available backends:
+
+```bash
+rm -rf build
+cmake -S . -B build
+cmake --build build
 ```
 
 - macOS: Xcode command line tools are recommended
